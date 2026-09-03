@@ -2,9 +2,16 @@ name: release
 
 # Cutting a release: tag main as vX.Y.Z and push the tag. This builds and
 # tests on Linux, produces the macOS universal .pkg and the Windows installer,
-# and attaches both to a GitHub Release for that tag. Signing is optional:
-# set the SILLAGE_CODESIGN_ID / SILLAGE_INSTALLER_ID repository secrets to
-# sign the macOS bundles and package.
+# and attaches both to a GitHub Release for that tag.
+#
+# Signing and notarisation are optional and driven entirely by repository
+# secrets (see README "Installers > Signing"); with none set the release is
+# unsigned. macOS: SILLAGE_MAC_CERT_P12 + SILLAGE_MAC_CERT_PASSWORD (the
+# Developer ID certificates), SILLAGE_CODESIGN_ID, SILLAGE_INSTALLER_ID, and
+# for notarisation either SILLAGE_NOTARY_KEY_P8 + SILLAGE_NOTARY_KEY_ID +
+# SILLAGE_NOTARY_ISSUER_ID or SILLAGE_APPLE_ID + SILLAGE_APPLE_TEAM_ID +
+# SILLAGE_APPLE_APP_PASSWORD. Windows: SILLAGE_WIN_CERT_PFX +
+# SILLAGE_WIN_CERT_PASSWORD.
 
 on:
   push:
@@ -36,14 +43,27 @@ jobs:
     needs: test-linux
     steps:
       - uses: actions/checkout@v4
+      - name: Import signing certificates
+        # No-op when the secret is absent (the script exits 0), so unsigned
+        # releases still build.
+        env:
+          SILLAGE_MAC_CERT_P12: ${{ secrets.SILLAGE_MAC_CERT_P12 }}
+          SILLAGE_MAC_CERT_PASSWORD: ${{ secrets.SILLAGE_MAC_CERT_PASSWORD }}
+        run: installers/macos/import-certificates.sh
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
       - name: Build
         run: cmake --build build --config Release --parallel
-      - name: Package
+      - name: Package, sign and notarise
         env:
           SILLAGE_CODESIGN_ID: ${{ secrets.SILLAGE_CODESIGN_ID }}
           SILLAGE_INSTALLER_ID: ${{ secrets.SILLAGE_INSTALLER_ID }}
+          SILLAGE_NOTARY_KEY_P8: ${{ secrets.SILLAGE_NOTARY_KEY_P8 }}
+          SILLAGE_NOTARY_KEY_ID: ${{ secrets.SILLAGE_NOTARY_KEY_ID }}
+          SILLAGE_NOTARY_ISSUER_ID: ${{ secrets.SILLAGE_NOTARY_ISSUER_ID }}
+          SILLAGE_APPLE_ID: ${{ secrets.SILLAGE_APPLE_ID }}
+          SILLAGE_APPLE_TEAM_ID: ${{ secrets.SILLAGE_APPLE_TEAM_ID }}
+          SILLAGE_APPLE_APP_PASSWORD: ${{ secrets.SILLAGE_APPLE_APP_PASSWORD }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           [[ "$GITHUB_REF_NAME" == v* ]] || VERSION="$(sed -n 's/^project(Sillage VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
@@ -63,8 +83,11 @@ jobs:
         run: cmake -B build
       - name: Build
         run: cmake --build build --config Release --parallel
-      - name: Package
+      - name: Package and sign
         shell: pwsh
+        env:
+          SILLAGE_WIN_CERT_PFX: ${{ secrets.SILLAGE_WIN_CERT_PFX }}
+          SILLAGE_WIN_CERT_PASSWORD: ${{ secrets.SILLAGE_WIN_CERT_PASSWORD }}
         run: |
           $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
           if (-not ("$env:GITHUB_REF_NAME" -like 'v*')) {

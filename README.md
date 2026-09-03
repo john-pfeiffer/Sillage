@@ -147,6 +147,27 @@ workflow attaches both installers to its artifacts; pushing a `vX.Y.Z` tag runs
 `.github/workflows/release.yml`, which builds them again and attaches them to a GitHub
 Release.
 
+### Signing
+
+Release builds sign and notarise when the repository secrets exist, and stay unsigned
+(still installable: right-click > Open on macOS, "More info > Run anyway" on Windows) when
+they do not. Dev builds are always unsigned.
+
+| Secret | What it is |
+|---|---|
+| `SILLAGE_MAC_CERT_P12`, `SILLAGE_MAC_CERT_PASSWORD` | One `.p12` exported from Keychain Access holding both the **Developer ID Application** and **Developer ID Installer** certificates with their keys, base64-encoded (`base64 -i certs.p12 \| pbcopy`), and its password |
+| `SILLAGE_CODESIGN_ID` | `Developer ID Application: Elan Vital Studios (TEAMID)` |
+| `SILLAGE_INSTALLER_ID` | `Developer ID Installer: Elan Vital Studios (TEAMID)` |
+| `SILLAGE_NOTARY_KEY_P8`, `SILLAGE_NOTARY_KEY_ID`, `SILLAGE_NOTARY_ISSUER_ID` | An App Store Connect API key (Users and Access > Integrations, Developer role): the `.p8` base64-encoded, its key id and the issuer id. Preferred for notarisation |
+| `SILLAGE_APPLE_ID`, `SILLAGE_APPLE_TEAM_ID`, `SILLAGE_APPLE_APP_PASSWORD` | The alternative: an Apple ID, its team id and an app-specific password |
+| `SILLAGE_WIN_CERT_PFX`, `SILLAGE_WIN_CERT_PASSWORD` | The Windows code-signing certificate as a base64 `.pfx` and its password |
+
+On macOS `import-certificates.sh` puts the certificates in a throwaway keychain,
+`build-pkg.sh` signs the three bundles with the hardened runtime, signs the package, submits
+it with `notarytool --wait`, prints the notarisation log on rejection, and staples the
+ticket. On Windows `build-installer.ps1` signs the VST3 DLL and the standalone before Inno
+Setup runs and the installer after, SHA-256 with an RFC 3161 timestamp.
+
 ## Development
 
 - Branches: `main` only for now; feature work lands on short-lived `jp/`-prefixed
