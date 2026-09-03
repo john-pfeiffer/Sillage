@@ -68,7 +68,7 @@ Every parameter is exposed to host automation (EVS standard).
 | Freeze & Chaos | Freeze | on / off | Stops the write head; the held buffer stays a playable source for Time / Spread / Pitch / Density |
 | Freeze & Chaos | Freeze Fade | 0–2000 ms | Crossfades into and out of Freeze so it never clicks |
 | Freeze & Chaos | Chaos | 0–100 % | Smoothed-random drift of read position, pitch, feedback (up to +30 %), density (±50 %) and shimmer detune; the loop limiter is what keeps 100 % musical |
-| Freeze & Chaos | Randomize Amt | 0–100 % | 100 = full reroll, 20 = a nudge. Randomize never touches Mix, Output, Freeze or Panic |
+| Freeze & Chaos | Randomize Amt | 0–100 % | 100 = full reroll, 20 = a nudge. Randomize never touches Mix, Output, Freeze, Wake mode or Panic |
 | Transients | Sensitivity | 0–100 % | Spectral-flux onset detector on the input; the Hit indicator shows detections |
 | Transients | Retrigger, Burst Count, Burst Rate, Burst Div, Burst Amt, Burst Offset | 1–16, 10–1000 ms / division, 0–100 %, 0–100 ms | A hit fires a burst of grains that all read the hit itself — a stutter, not a smear. Rate follows Sync |
 | Transients | Duck, Duck Depth, Duck Attack, Duck Release | 0–100 %, 1–50 ms, 20–2000 ms | A hit pushes the wet signal down and lets it bloom back |
@@ -88,6 +88,13 @@ Every parameter is exposed to host automation (EVS standard).
 | Rewind | Rewind Every, Rewind Div, Rewind Thresh | 0.1–30 s, 1/4 – 8 bars, −60–0 dB | |
 | Rewind | Rewind Level, Rewind Pitch | 0–100 %, ±12 st | The captured tail plays back *reversed* into the feedback path, so it swells up through the colour stages |
 | Rewind | Rewind Now | momentary | Manual trigger (automatable); works in every trigger mode |
+| Wake | Wake | Shared / Isolated | Shared: new input writes into the same buffer the tail lives in. Isolated: every onset spawns its own tail instance (own buffer, scheduler, feedback path and Age clock), up to 8, oldest stolen with a fade; input keeps feeding the newest one between onsets. Switching crossfades the input routing, so the ringing tail is never dropped. Randomize leaves this alone |
+| Wake | Displace | 0–100 % | How much a new hit pushes the existing tail down: Choke made continuous in Shared, and a duck of the older instances in Isolated. Uses Choke Fade |
+| Modulation | Mod 1–6 Src / Dest / Amt / Curve | see below | Six slots: Source → Destination, bipolar Amount (±100 % = the whole knob, in the destination's own range), Curve (Linear / Exp / Log) |
+| Modulation | Transient Decay | 10–2000 ms | Decay of the Transient source's one-shot |
+| Modulation | LFO 1–2 Shape / Rate / Sync / Div / Phase | Sine / Tri / Saw / Square / S&H, 0.01–20 Hz, division, 0–360° | Two LFOs; synced ones lock to the host transport |
+| Output | Width | 0–200 % | Mid/side width of the wet signal, after the wet filters |
+| Output | Wet HP / Wet LP | 20–4000 Hz / 200–20000 Hz | Post-loop filters: clean the output without changing the feedback behaviour |
 
 The signal chain inside the loop is fixed: `grain sum → HP → LP → Shimmer → Diffuse →
 Saturation → Limiter → buffer`. The limiter is what makes Feedback above 100 % safe, so
@@ -103,12 +110,42 @@ Curves shape each grain from its own age (global destinations use the average ag
 live grains). Loudness compensation blends from coherent at Spread 0 to incoherent at
 Spread 100, so Feedback means the same thing across the whole delay-to-reverb range.
 
-Memory per instance at 48 kHz is about 13 MB (10 s audio ring, its age ring, a 12 s Rewind
-capture and its age ring), all allocated in `prepareToPlay`.
+**Modulation sources:** Age (grain) — a grain's own age over Lifetime, resolved per grain
+for the per-grain destinations (Size, Pitch, Pitch Spread, Pan Spread, Reverse) and as the
+average of the live grains everywhere else; Age (avg) — the average age of live grains over
+Lifetime; Envelope — the input envelope relative to recent loudness; Transient — a one-shot
+on a hit with Transient Decay; Chaos — a smoothed-random source of its own; LFO 1 / LFO 2.
 
-Build phases 1–6 of the handoff's build order are in. Still to come: Wake modes and
-Displace; mod slots and LFOs; Width and the post-loop Wet HP/LP; presets and installers;
-and the Custom user scale for Quantize.
+**Modulation destinations:** Time, Density, Spread, Size, Feedback, Pitch, Pitch Spread,
+Pan Spread, Reverse, Loop HP, Loop LP, Shimmer Amt, Shimmer Fine, Diffuse, Drive, the five
+per-pass Degrade amounts, Rewind Level, Displace, Mix.
+
+The wet stage after the loop is `Duck → Wet HP/LP → Width → Mix`.
+
+**Presets:** the plugin state saves with the host session as usual; the Save / Load buttons
+write and read `.sillage` files (the same XML), defaulting to
+`Documents/Elan Vital Studios/Sillage/Presets`. Init returns every parameter and curve to
+its default.
+
+Memory per instance at 48 kHz is about 44 MB, all allocated in `prepareToPlay`: 13 MB for
+the shared tail (10 s audio ring, its age ring, a 12 s Rewind capture and its age ring),
+9 × 3.5 MB for the isolated Wake instances (6 s ring plus age ring each, one spare slot for
+a stolen instance's fade), and a second Rewind capture that covers them together.
+
+All nine phases of the handoff's build order are in. Still to come: the Custom user scale
+for Quantize, and the deferred items in the handoff (sidechain detection, MIDI-triggered
+Freeze/Rewind, a preset browser, oversampled saturation).
+
+## Installers
+
+`installers/macos/build-pkg.sh <version> <artefacts-dir>` builds a universal `.pkg`
+(VST3, AU, optional Standalone) with `pkgbuild`/`productbuild`; set
+`SILLAGE_CODESIGN_ID` and `SILLAGE_INSTALLER_ID` to sign. `installers/windows/build-installer.ps1`
+compiles `installers/windows/Sillage.iss` with Inno Setup 6 into a `.exe` that installs the
+VST3 to the shared 64-bit VST3 folder and (optionally) the Standalone app. The dev-build
+workflow attaches both installers to its artifacts; pushing a `vX.Y.Z` tag runs
+`.github/workflows/release.yml`, which builds them again and attaches them to a GitHub
+Release.
 
 ## Development
 
