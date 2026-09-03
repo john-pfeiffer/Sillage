@@ -1,0 +1,96 @@
+name: release
+
+# Cutting a release: tag main as vX.Y.Z and push the tag. This builds and
+# tests on Linux, produces the macOS universal .pkg and the Windows installer,
+# and attaches both to a GitHub Release for that tag. Signing is optional:
+# set the SILLAGE_CODESIGN_ID / SILLAGE_INSTALLER_ID repository secrets to
+# sign the macOS bundles and package.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    name: Build + test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install JUCE Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxext-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libfreetype-dev \
+            libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  installer-macos:
+    name: Installer (macOS universal)
+    runs-on: macos-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Package
+        env:
+          SILLAGE_CODESIGN_ID: ${{ secrets.SILLAGE_CODESIGN_ID }}
+          SILLAGE_INSTALLER_ID: ${{ secrets.SILLAGE_INSTALLER_ID }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [[ "$GITHUB_REF_NAME" == v* ]] || VERSION="$(sed -n 's/^project(Sillage VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          installers/macos/build-pkg.sh "$VERSION" build/Sillage_artefacts/Release dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sillage-installer-macos
+          path: dist/*.pkg
+
+  installer-windows:
+    name: Installer (Windows)
+    runs-on: windows-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          if (-not ("$env:GITHUB_REF_NAME" -like 'v*')) {
+            $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(Sillage VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          }
+          installers/windows/build-installer.ps1 -Version $version -BuildDir build/Sillage_artefacts/Release -OutDir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sillage-installer-windows
+          path: dist/*.exe
+
+  publish:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [installer-macos, installer-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.pkg
+            dist/*.exe
+          generate_release_notes: true

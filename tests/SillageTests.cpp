@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "LifetimeCurves.h"
+#include "Modulation.h"
 #include "OnsetDetector.h"
 #include "PluginProcessor.h"
 #include "Randomize.h"
@@ -90,6 +91,13 @@ void configureAsPlainDelay (SillageAudioProcessor& p)
     setParam (p, params::id::rewindOn, 0.0f);
     for (auto* id : params::id::curveEnable)
         setParam (p, id, 0.0f);
+    setParam (p, params::id::wakeMode, 0.0f);
+    setParam (p, params::id::displace, 0.0f);
+    for (auto* id : params::id::modSource)
+        setParam (p, id, 0.0f);
+    setParam (p, params::id::width, 100.0f);
+    setParam (p, params::id::wetHighpass, 20.0f);
+    setParam (p, params::id::wetLowpass, 20000.0f);
 }
 
 // Installs a two-point straight line for one Lifetime Curve destination and
@@ -690,7 +698,10 @@ void testRandomizeCoversEverythingExceptTheExclusions()
         }
     }
 
-    check (exclusionsHeld, "randomize never touches Mix, Output, Freeze, Panic, Fallback BPM or itself");
+    check (exclusionsHeld, "randomize never touches Mix, Output, Freeze, Wake, Panic, Fallback BPM or itself");
+    check (randomize::isExcluded (params::id::wakeMode) && ! randomize::isExcluded (params::id::modSource[0])
+               && ! randomize::isExcluded (params::id::displace),
+           "Wake mode is excluded; mod slots and Displace are not");
     check (everythingElseMoved && moved > 30, "randomize moves every other parameter");
 }
 
@@ -1282,6 +1293,413 @@ void testRewindRestartStaysClean()
 
 } // namespace
 
+// ---- Phase 7: Wake ------------------------------------------------------------
+
+// Displace is Choke made continuous: in Shared mode a hit pushes the tail
+// down by that much, with no Choke switch involved.
+void testDisplacePushesTheTailDown()
+{
+    const auto tailAfterHit = [] (float displace)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 95.0f);
+        setParam (*p, params::id::chokeFade, 20.0f);
+        setParam (*p, params::id::displace, displace);
+
+        Audio out;
+        render (*p, 2.6, [] (int64_t i, int)
+        {
+            const auto t = (double) i / kSampleRate;
+            if (t < 0.5)                       return sine (i, 220.0) * 0.5f;
+            if (i == (int64_t) atSecond (2.0)) return 0.05f; // a quiet hit
+            return 0.0f;
+        }, out);
+
+        return std::make_pair (peakSeconds (out, 1.8, 2.0), peakSeconds (out, 2.1, 2.6));
+    };
+
+    const auto [beforeFull, afterFull] = tailAfterHit (100.0f);
+    const auto [beforeNone, afterNone] = tailAfterHit (0.0f);
+
+    check (beforeFull > 1.0e-3f && beforeNone > 1.0e-3f, "tail is sustaining before the hit");
+    check (afterFull < afterNone * 0.3f, "displace=100 wipes the tail a hit lands on");
+    check (afterNone > beforeNone * 0.3f, "displace=0 lets hits pile up on the tail");
+}
+
+// Isolated: every hit gets its own instance, so a later hit's Choke cannot
+// touch an earlier tail — that is what "stays articulate" means.
+void testIsolatedProtectsEarlierTails()
+{
+    const auto run = [] (bool isolated)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::wakeMode, isolated ? 1.0f : 0.0f);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 95.0f);
+        setParam (*p, params::id::chokeOn, 1.0f);
+        setParam (*p, params::id::chokeAmount, 100.0f);
+        setParam (*p, params::id::chokeFade, 20.0f);
+
+        int instances = 0;
+        Audio out;
+        render (*p, 2.6, [] (int64_t i, int)
+        {
+            const auto t = (double) i / kSampleRate;
+            if (t < 0.5)                       return sine (i, 220.0) * 0.5f;
+            if (i == (int64_t) atSecond (2.0)) return 0.05f;
+            return 0.0f;
+        }, out, [&] (int64_t) { instances = juce::jmax (instances, p->getActiveInstanceCount()); });
+
+        return std::make_tuple (peakSeconds (out, 1.8, 2.0), peakSeconds (out, 2.1, 2.6), instances, allFinite (out));
+    };
+
+    const auto [sharedBefore, sharedAfter, sharedInstances, sharedFinite] = run (false);
+    const auto [isoBefore, isoAfter, isoInstances, isoFinite]             = run (true);
+
+    check (sharedFinite && isoFinite, "both Wake modes render finite audio");
+    check (sharedBefore > 1.0e-3f && isoBefore > 1.0e-3f, "a tail is sustaining before the second hit in both modes");
+    check (sharedInstances == 0 && isoInstances >= 2, "Isolated spawns an instance per hit; Shared spawns none");
+    check (sharedAfter < sharedBefore * 0.3f, "Shared: the second hit chokes the first tail");
+    check (isoAfter > isoBefore * 0.4f, "Isolated: the first tail survives the second hit's choke");
+}
+
+// A new instance is primed with the input that spawned it, so Retrigger can
+// still stutter the hit even though the instance's buffer is seconds old.
+void testIsolatedRetriggerReadsTheHit()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::wakeMode, 1.0f);
+    setParam (*p, params::id::time, 2000.0f);
+    setParam (*p, params::id::density, 0.5f);
+    setParam (*p, params::id::size, 40.0f);
+    setParam (*p, params::id::window, 3.0f);
+    setParam (*p, params::id::retriggerOn, 1.0f);
+    setParam (*p, params::id::retriggerCount, 4.0f);
+    setParam (*p, params::id::retriggerRate, 100.0f);
+    setParam (*p, params::id::retriggerAmount, 100.0f);
+    setParam (*p, params::id::retriggerOffset, 0.0f);
+
+    Audio out;
+    render (*p, 1.5, clickAt (0.5), out);
+
+    bool fourBursts = true;
+    for (int k = 0; k < 4; ++k)
+    {
+        const auto start = 0.5 + 0.1 * k;
+        fourBursts = fourBursts && peakSeconds (out, start, start + 0.06) > 0.1f;
+    }
+    check (fourBursts, "Isolated: a fresh instance still stutters the hit that spawned it");
+    check (p->getActiveInstanceCount() >= 1, "Isolated: the hit spawned an instance");
+}
+
+void testIsolatedInstanceCap()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::wakeMode, 1.0f);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::feedback, 90.0f);
+
+    int highWater = 0;
+    Audio out;
+    render (*p, 3.0, [] (int64_t i, int)
+    {
+        // Twelve hits 150 ms apart from 0.2 s.
+        for (int k = 0; k < 12; ++k)
+            if (i == (int64_t) atSecond (0.2 + 0.15 * k))
+                return 1.0f;
+        return 0.0f;
+    }, out, [&] (int64_t) { highWater = juce::jmax (highWater, p->getActiveInstanceCount()); });
+
+    check (allFinite (out), "twelve hits in Isolated mode stay finite");
+    check (highWater >= 4, "Isolated spawns an instance per hit");
+    check (highWater <= WakeEngine::kMaxInstances, "Isolated never sounds more than eight instances");
+}
+
+// Switching modes re-routes the input; the tail that is already ringing
+// keeps ringing on the side it lives.
+void testWakeSwitchKeepsTheTail()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::feedback, 95.0f);
+
+    Audio out;
+    render (*p, 3.0, toneThenSilence (220.0, 0.5), out, [&] (int64_t blockStart)
+    {
+        if (blockStart == (int64_t) atSecond (1.0) / kBlockSize * kBlockSize) setParam (*p, params::id::wakeMode, 1.0f);
+        if (blockStart == (int64_t) atSecond (2.0) / kBlockSize * kBlockSize) setParam (*p, params::id::wakeMode, 0.0f);
+    });
+
+    const auto before = peakSeconds (out, 0.8, 1.0);
+    const auto after  = peakSeconds (out, 1.2, 1.5);
+    const auto later  = peakSeconds (out, 2.2, 2.5);
+
+    check (allFinite (out), "switching Wake modes mid-tail stays finite");
+    check (after > before * 0.4f, "switching to Isolated keeps the shared tail ringing");
+    check (later > after * 0.3f, "switching back to Shared keeps it ringing too");
+}
+
+// Between onsets input feeds the newest instance — and with no onset at all,
+// sustained material still gets one.
+void testIsolatedSustainedInputGetsATail()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::wakeMode, 1.0f);
+    setParam (*p, params::id::sensitivity, 0.0f);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::feedback, 90.0f);
+
+    Audio out;
+    render (*p, 2.0, [] (int64_t i, int)
+    {
+        const auto t = (double) i / kSampleRate;
+        if (t < 0.2 || t >= 1.0)
+            return 0.0f;
+        const auto swell = (float) juce::jmin (1.0, (t - 0.2) / 0.2); // no edge to detect
+        return sine (i, 220.0) * 0.4f * swell;
+    }, out);
+
+    check (peakSeconds (out, 1.1, 1.5) > 1.0e-3f, "Isolated: a swelled tone with no onset still gets a tail");
+}
+
+// ---- Phase 8: modulation ------------------------------------------------------
+
+void testModulationMaths()
+{
+    using namespace mod;
+    check (std::abs (shape (0.5f, Curve::linear) - 0.5f) < 1.0e-6f
+               && std::abs (shape (0.5f, Curve::exponential) - 0.25f) < 1.0e-6f
+               && std::abs (shape (0.5f, Curve::logarithmic) - 0.70710678f) < 1.0e-5f,
+           "mod curves: linear passes, exp squares, log roots");
+
+    const juce::NormalisableRange<float> range (0.0f, 100.0f);
+    check (std::abs (applyOffset (range, 50.0f, 0.25f) - 75.0f) < 1.0e-4f
+               && std::abs (applyOffset (range, 90.0f, 0.5f) - 100.0f) < 1.0e-4f
+               && std::abs (applyOffset (range, 10.0f, -0.5f)) < 1.0e-4f,
+           "mod offsets move in normalised space and clamp at the ends");
+
+    check (perGrainIndex (Destination::size) >= 0 && perGrainIndex (Destination::feedback) < 0,
+           "Size is a per-grain destination, Feedback a global one");
+}
+
+// An LFO on Mix: the dry level dips every half cycle, free-running or synced.
+void testLfoModulatesMix()
+{
+    const auto amplitudeAt = [] (bool synced, double from, double to)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 3000.0f); // the wet stays silent throughout
+        setParam (*p, params::id::mix, 50.0f);
+        setParam (*p, params::id::modSource[0], (float) mod::Source::lfo1);
+        setParam (*p, params::id::modDestination[0], (float) mod::Destination::mix);
+        setParam (*p, params::id::modAmount[0], 100.0f);
+        setParam (*p, params::id::lfoShape[0], (float) mod::LfoShape::sine);
+        setParam (*p, params::id::lfoRate[0], 2.0f);
+        setParam (*p, params::id::lfoSync[0], synced ? 1.0f : 0.0f);
+        setParam (*p, params::id::lfoDivision[0], 13.0f); // 1/4: 2 Hz at 120 BPM
+        setParam (*p, params::id::fallbackBpm, 120.0f);
+
+        Audio out;
+        render (*p, 1.2, [] (int64_t i, int) { return sine (i, 1000.0) * 0.5f; }, out);
+        return peakSeconds (out, from, to);
+    };
+
+    // Mix rides 50..100 %, so the dry gain runs from 0.71 down to 0.
+    const auto low1  = amplitudeAt (false, 0.23, 0.27);
+    const auto high1 = amplitudeAt (false, 0.48, 0.52);
+    const auto low2  = amplitudeAt (false, 0.73, 0.77);
+    check (high1 > 0.25f && low1 < high1 * 0.2f && low2 < high1 * 0.2f,
+           "a 2 Hz LFO on Mix dips the dry level twice a second");
+
+    const auto lowSynced  = amplitudeAt (true, 0.23, 0.27);
+    const auto highSynced = amplitudeAt (true, 0.48, 0.52);
+    check (highSynced > 0.25f && lowSynced < highSynced * 0.2f,
+           "a synced 1/4-note LFO at 120 BPM runs at the same 2 Hz");
+}
+
+// The Transient source is a one-shot: a hit makes the scheduler dense for
+// the decay time.
+void testTransientSourceRaisesDensity()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 5.0f);
+    setParam (*p, params::id::size, 80.0f);
+    setParam (*p, params::id::modSource[1], (float) mod::Source::transient);
+    setParam (*p, params::id::modDestination[1], (float) mod::Destination::density);
+    setParam (*p, params::id::modAmount[1], 100.0f);
+    setParam (*p, params::id::modTransientDecay, 300.0f);
+
+    int before = 0, after = 0;
+    Audio out;
+    render (*p, 1.5, clickAt (1.0), out, [&] (int64_t blockStart)
+    {
+        if (blockStart >= (int64_t) atSecond (0.5) && blockStart < (int64_t) atSecond (0.95))
+            before = juce::jmax (before, p->getActiveGrainCount());
+        if (blockStart >= (int64_t) atSecond (1.02) && blockStart < (int64_t) atSecond (1.15))
+            after = juce::jmax (after, p->getActiveGrainCount());
+    });
+
+    check (before <= 2, "at 5 grains/s only a grain or two sounds at once");
+    check (after >= before + 6, "a hit through the Transient source makes the scheduler dense");
+}
+
+// Per-grain Age modulating Pitch resolves per grain: with feedback off, Time
+// is the age of what a grain plays, so second-old audio comes back higher
+// than 100 ms-old audio — the Lifetime-curve test, through a mod slot.
+void testAgeModRaisesOlderGrains()
+{
+    const auto pitchAtTime = [] (float timeMs)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, timeMs);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::size, 100.0f);
+        setParam (*p, params::id::pitchSpread, 5.0f);
+        setParam (*p, params::id::lifetime, 2000.0f);
+        setParam (*p, params::id::modSource[2], (float) mod::Source::agePerGrain);
+        setParam (*p, params::id::modDestination[2], (float) mod::Destination::pitch);
+        setParam (*p, params::id::modAmount[2], 25.0f); // a quarter of ±24 st: +12 st at full Lifetime
+
+        Audio out;
+        render (*p, 2.5, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out);
+        return dominantFrequency (out[0], atSecond (2.0), atSecond (2.4));
+    };
+
+    const auto young = pitchAtTime (100.0f);   // age 0.05 of Lifetime -> +0.6 st
+    const auto old   = pitchAtTime (1000.0f);  // age 0.5 of Lifetime -> +6 st
+
+    check (young > 210.0 && young < 245.0, "per-grain Age mod leaves 100 ms-old audio near its pitch");
+    check (old > young * 1.25, "per-grain Age mod plays second-old audio a good fourth higher");
+}
+
+// ---- Phase 9: output stage, presets ------------------------------------------
+
+// Width is mid/side on the wet signal: 0 folds it to mono, 200 doubles the side.
+void testWidthCollapsesAndWidens()
+{
+    const auto side = [] (float width)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::width, width);
+
+        // Left-only input: a deterministic stereo image.
+        Audio out;
+        render (*p, 1.5, [] (int64_t i, int ch) { return ch == 0 ? sine (i, 220.0) * 0.5f : 0.0f; }, out);
+
+        double energy = 0.0;
+        float maxDiff = 0.0f;
+        for (auto i = atSecond (0.5); i < atSecond (1.5); ++i)
+        {
+            const auto d = out[0][i] - out[1][i];
+            energy += (double) d * (double) d;
+            maxDiff = juce::jmax (maxDiff, std::abs (d));
+        }
+        return std::make_pair (std::sqrt (energy / (double) atSecond (1.0)), maxDiff);
+    };
+
+    const auto [sideMono, diffMono]     = side (0.0f);
+    const auto [sideNormal, diffNormal] = side (100.0f);
+    const auto [sideWide, diffWide]     = side (200.0f);
+    juce::ignoreUnused (diffNormal, diffWide);
+
+    check (diffMono < 1.0e-5f, "width=0 folds the wet signal to mono");
+    check (sideNormal > 1.0e-3, "a left-only input gives the wet a stereo image at width=100");
+    check (std::abs (sideWide / sideNormal - 2.0) < 0.1, "width=200 doubles the side signal");
+}
+
+// Wet HP/LP sit after the loop: they clean the output without touching the
+// feedback behaviour or the dry path.
+void testWetFiltersCleanTheOutput()
+{
+    const auto level = [] (double hz, float wetHp, float wetLp)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::wetHighpass, wetHp);
+        setParam (*p, params::id::wetLowpass, wetLp);
+
+        Audio out;
+        render (*p, 1.5, [hz] (int64_t i, int) { return sine (i, hz) * 0.5f; }, out);
+        return rms (out[0], atSecond (0.5), atSecond (1.5));
+    };
+
+    const auto brightOpen = level (3520.0, 20.0f, 20000.0f);
+    const auto brightLp   = level (3520.0, 20.0f, 300.0f);
+    const auto lowOpen    = level (220.0, 20.0f, 20000.0f);
+    const auto lowHp      = level (220.0, 3000.0f, 20000.0f);
+
+    check (brightLp < brightOpen * 0.1, "wet LP at 300 Hz takes a 3.5 kHz tail down by over 20 dB");
+    check (lowHp < lowOpen * 0.1, "wet HP at 3 kHz takes a 220 Hz tail down by over 20 dB");
+
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::mix, 0.0f);
+    setParam (*p, params::id::wetLowpass, 300.0f);
+    setParam (*p, params::id::wetHighpass, 3000.0f);
+    Audio out;
+    render (*p, 0.5, [] (int64_t i, int) { return sine (i, 1000.0) * 0.5f; }, out);
+    bool untouched = true;
+    for (auto i = atSecond (0.1); i < atSecond (0.5); ++i)
+        untouched = untouched && std::abs (out[0][i] - sine ((int64_t) i, 1000.0) * 0.5f) < 1.0e-4f;
+    check (untouched, "wet filters leave the dry path alone");
+}
+
+void testPresetFileRoundTrip()
+{
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SillageTest.sillage");
+
+    {
+        auto p = makeProcessor();
+        setParam (*p, params::id::mix, 72.0f);
+        setParam (*p, params::id::wakeMode, 1.0f);
+        setParam (*p, params::id::modSource[3], (float) mod::Source::lfo2);
+        setLine (*p, lifetime::Destination::level, 1.0f, 0.2f, true);
+        check (p->savePreset (file), "a preset file can be written");
+        check (p->getPresetName() == "SillageTest", "saving names the preset after its file");
+    }
+
+    auto q = makeProcessor();
+    check (q->loadPreset (file), "a preset file can be read back");
+    check (std::abs (getParam (*q, params::id::mix) - 72.0f) < 0.01f
+               && getParam (*q, params::id::wakeMode) >= 0.5f
+               && (int) getParam (*q, params::id::modSource[3]) == (int) mod::Source::lfo2,
+           "preset parameters restore");
+    check (std::abs (q->getCurves().curves[(size_t) lifetime::Destination::level].evaluate (1.0f) - 0.2f) < 1.0e-4f
+               && getParam (*q, params::id::curveEnable[(size_t) lifetime::Destination::level]) >= 0.5f,
+           "preset curves restore");
+    check (q->getPresetName() == "SillageTest", "loading sets the preset name");
+
+    q->resetToDefaults();
+    check (std::abs (getParam (*q, params::id::mix) - 30.0f) < 0.01f
+               && getParam (*q, params::id::wakeMode) < 0.5f
+               && (int) getParam (*q, params::id::modSource[3]) == 0
+               && q->getPresetName() == "Init",
+           "Init returns every parameter to its default");
+
+    file.deleteFile();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1327,6 +1745,22 @@ int main()
     testRewindThresholdRefiresTheTail();
     testRewindTimerBumpsPeriodically();
     testRewindRestartStaysClean();
+
+    testDisplacePushesTheTailDown();
+    testIsolatedProtectsEarlierTails();
+    testIsolatedRetriggerReadsTheHit();
+    testIsolatedInstanceCap();
+    testWakeSwitchKeepsTheTail();
+    testIsolatedSustainedInputGetsATail();
+
+    testModulationMaths();
+    testLfoModulatesMix();
+    testTransientSourceRaisesDensity();
+    testAgeModRaisesOlderGrains();
+
+    testWidthCollapsesAndWidens();
+    testWetFiltersCleanTheOutput();
+    testPresetFileRoundTrip();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

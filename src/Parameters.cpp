@@ -1,5 +1,6 @@
 #include "Parameters.h"
 #include "LifetimeCurves.h"
+#include "Modulation.h"
 #include "Scales.h"
 
 namespace params
@@ -191,10 +192,41 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // Momentary: fires a rewind on the rising edge.
     layout.add (makeBool (id::rewindManual, "Rewind Now", false));
 
+    // ---- Wake (5.8) ---------------------------------------------------------
+    layout.add (makeChoice (id::wakeMode, "Wake", juce::StringArray { "Shared", "Isolated" }, 0));
+    layout.add (makeFloat (id::displace, "Displace", percent(), 0.0f, label ("%")));
+
+    // ---- Modulation (5.9) ---------------------------------------------------
+    for (int s = 0; s < id::kNumModSlots; ++s)
+    {
+        const auto n = juce::String (s + 1);
+        layout.add (makeChoice (id::modSource[(size_t) s], ("Mod " + n + " Src").toRawUTF8(), mod::sourceNames(), 0));
+        layout.add (makeChoice (id::modDestination[(size_t) s], ("Mod " + n + " Dest").toRawUTF8(), mod::destinationNames(), 0));
+        layout.add (makeFloat (id::modAmount[(size_t) s], ("Mod " + n + " Amt").toRawUTF8(),
+                               juce::NormalisableRange<float> (-100.0f, 100.0f), 0.0f, label ("%")));
+        layout.add (makeChoice (id::modCurve[(size_t) s], ("Mod " + n + " Curve").toRawUTF8(), mod::curveNames(), 0));
+    }
+    layout.add (makeFloat (id::modTransientDecay, "Transient Decay", skewed (10.0f, 2000.0f, 250.0f), 250.0f, label ("ms")));
+
+    for (int l = 0; l < id::kNumLfos; ++l)
+    {
+        const auto n = juce::String (l + 1);
+        layout.add (makeChoice (id::lfoShape[(size_t) l], ("LFO " + n + " Shape").toRawUTF8(), mod::lfoShapeNames(), 0));
+        layout.add (makeFloat (id::lfoRate[(size_t) l], ("LFO " + n + " Rate").toRawUTF8(),
+                               skewed (0.01f, 20.0f, 1.0f), 1.0f, label ("Hz")));
+        layout.add (makeBool (id::lfoSync[(size_t) l], "LFO " + n + " Sync", false));
+        layout.add (makeChoice (id::lfoDivision[(size_t) l], ("LFO " + n + " Div").toRawUTF8(), divisionNames(), kDefaultDivision));
+        layout.add (makeFloat (id::lfoPhase[(size_t) l], ("LFO " + n + " Phase").toRawUTF8(),
+                               juce::NormalisableRange<float> (0.0f, 360.0f), 0.0f, label ("deg")));
+    }
+
     // ---- Output & global (5.11) ---------------------------------------------
     layout.add (makeFloat (id::mix, "Mix", percent(), 30.0f, label ("%")));
     layout.add (makeFloat (id::output, "Output",
                            juce::NormalisableRange<float> (-24.0f, 24.0f), 0.0f, label ("dB")));
+    layout.add (makeFloat (id::width, "Width", juce::NormalisableRange<float> (0.0f, 200.0f), 100.0f, label ("%")));
+    layout.add (makeFloat (id::wetHighpass, "Wet HP", skewed (20.0f, 4000.0f, 200.0f), 20.0f, label ("Hz")));
+    layout.add (makeFloat (id::wetLowpass, "Wet LP", skewed (200.0f, 20000.0f, 2000.0f), 20000.0f, label ("Hz")));
 
     // Used for synced parameters when the host provides no tempo.
     layout.add (makeFloat (id::fallbackBpm, "Fallback BPM",

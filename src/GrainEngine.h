@@ -7,6 +7,7 @@
 
 #include "FeedbackPath.h"
 #include "LifetimeCurves.h"
+#include "Modulation.h"
 #include "Scales.h"
 
 // Hard cap on simultaneously sounding grains. Compile-time by design (EVS DSP
@@ -37,6 +38,54 @@ enum class WindowShape
     tukey,
     expoDecay,
     numShapes
+};
+
+// Rewind (5.7): captures a wet tail, and plays the last Rewind Length of it
+// backward on a trigger. Two voices crossfade so a new trigger restarts
+// rather than stacks. The engine owns one for the shared tail; the Wake layer
+// owns another that covers the isolated instances together.
+class RewindPlayer
+{
+public:
+    void prepare (double sampleRate, int numChannels);
+    void reset();
+
+    bool isPrepared() const noexcept { return capacity > 0; }
+    bool isPlaying() const noexcept;
+
+    // Starts (or restarts, with a crossfade) playback of the last
+    // `lengthSamples` of capture at `rate`.
+    void begin (double lengthSamples, double rate) noexcept;
+
+    // Records one frame of tail (two channels) and its age.
+    void capture (const float* frame, float ageSeconds) noexcept;
+
+    // Adds one frame of playback to `out` (two channels) and accumulates the
+    // amplitude-weighted age of what was played.
+    void render (float* out, float& ageAccum, float& weightAccum,
+                 float level, double rate, int activeChannels) noexcept;
+
+private:
+    struct Voice
+    {
+        bool   active    = false;
+        double readPos   = 0.0;
+        double remaining = 0.0;
+        float  fade      = 0.0f;
+        float  fadeStep  = 0.0f;
+        bool   fadingOut = false;
+    };
+
+    float read (int channel, double position) const noexcept;
+
+    juce::AudioBuffer<float> ring;
+    std::vector<float> ageRing;
+    int    capacity  = 0;
+    int    writePos  = 0;
+    int    channels  = 2;
+    double sampleRate = 44100.0;
+    float  fadeStep  = 0.0f;
+    std::array<Voice, 2> voices {};
 };
 
 // Input writes continuously into a stereo circular buffer; a scheduler fires
@@ -93,6 +142,13 @@ public:
         double rewindLengthSamples = 0.0;
         float  rewindLevel         = 1.0f;
         double rewindRate          = 1.0;  // 2^(pitch/12)
+
+        // Modulation (5.9): slots whose source is per-grain Age and whose
+        // destination is per-grain resolve here, at grain birth, through the
+        // destination parameter's own range.
+        std::array<mod::PerGrainMod, params::id::kNumModSlots> ageMods {};
+        int numAgeMods = 0;
+        std::array<const juce::NormalisableRange<float>*, mod::kNumPerGrain> perGrainRanges {};
     };
 
     // What a detected transient does inside the engine (5.5, 5.7). Duck lives
@@ -113,12 +169,26 @@ public:
         bool   rewind = false; // Rewind trigger mode is Transient
     };
 
-    void prepare (double sampleRate, int numChannels);
+    // `bufferSeconds` sizes the circular buffer; an isolated Wake instance
+    // (5.8) uses a shorter one and no Rewind capture of its own.
+    void prepare (double sampleRate, int numChannels,
+                  double bufferSeconds = kBufferSeconds, bool withRewind = true);
     void reset();
+
+    // The 64-grain cap is global (5.8): the Wake layer shares it out between
+    // the engines that are sounding.
+    void setGrainCap (int cap) noexcept { grainCap = juce::jlimit (1, kMaxGrains, cap); }
+
+    // Writes input straight into the buffer at age 0, without the feedback
+    // path — how a new isolated instance receives the hit that spawned it.
+    void primeInput (const float* const* input, int numChannels, int numSamples) noexcept;
 
     // Renders numSamples of wet output and writes input + the feedback path's
     // output back into the buffer. `input` and `wet` may not alias. `onsets`
     // holds block-relative sample offsets of detected transients, ascending.
+    // `inject` (optional, two channels) is added to the feedback path's input
+    // along with its per-sample age, which is how a Rewind reaches an
+    // isolated instance.
     void process (const float* const* input,
                   float* const* wet,
                   int numChannels,
@@ -126,7 +196,9 @@ public:
                   const Settings& settings,
                   const int* onsets,
                   int numOnsets,
-                  const TransientResponse& response);
+                  const TransientResponse& response,
+                  const float* const* inject = nullptr,
+                  const float* injectAge = nullptr);
 
     // Starts (or restarts, with a crossfade) a reversed playback of the last
     // Rewind Length of captured tail into the feedback path.
@@ -176,26 +248,17 @@ private:
     {
         double lengthSamples      = 0.0;
         float  pitchOffset        = 0.0f;
+        float  pitchSpread        = 0.0f;
         float  reverseProbability = 0.0f;
         float  panSpread          = 0.0f;
         float  level              = 1.0f;
-    };
-
-    struct RewindVoice
-    {
-        bool   active    = false;
-        double readPos   = 0.0;
-        double remaining = 0.0;
-        float  fade      = 0.0f;
-        float  fadeStep  = 0.0f;
-        bool   fadingOut = false;
     };
 
     float readInterpolated (int channel, double position) const noexcept;
     float ageAt (double position) const noexcept;
     float ageOfRegion (double startPos, double span) const noexcept;
     GrainShape resolveShape (const Settings& settings, float ageSeconds) noexcept;
-    float resolvePitchRate (const Settings& settings, float pitchOffset) noexcept;
+    float resolvePitchRate (const Settings& settings, const GrainShape& shape) noexcept;
     void  activateGrain (double startPos, double rate, const Settings& settings,
                          const GrainShape& shape, float gainScale, float ageSeconds);
     void  spawnScheduledGrain (const Settings& settings);
@@ -204,7 +267,6 @@ private:
     void  beginChoke (const TransientResponse& response);
     void  advanceChoke() noexcept;
     void  beginRewind (const Settings& settings) noexcept;
-    float readRewind (int channel, double position) const noexcept;
     int   claimSlot();
 
     double sampleRate = 44100.0;
@@ -216,6 +278,7 @@ private:
 
     std::array<Grain, kGrainSlots> grains {};
     int     activeGrains = 0;
+    int     grainCap     = kMaxGrains;
     int64_t grainCounter = 0;
     double  samplesUntilNextGrain = 0.0;
     bool    slotParity = false; // swing alternates on this
@@ -257,14 +320,9 @@ private:
     int   chokeSweepPos       = 0;
     float chokeGain           = 1.0f;
 
-    // Rewind capture and playback.
-    juce::AudioBuffer<float> rewindRing;
-    std::vector<float> rewindAgeRing;
-    int    rewindCapacity  = 0;
-    int    rewindWritePos  = 0;
-    std::array<RewindVoice, 2> rewindVoices {};
+    // Rewind capture and playback (absent on an isolated instance).
+    RewindPlayer rewind;
     bool   rewindRequested = false;
-    float  rewindFadeStep  = 0.0f;
 
     std::atomic<float> averageAgeSeconds { 0.0f };
 

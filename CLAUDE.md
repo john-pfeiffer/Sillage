@@ -15,9 +15,10 @@
 - **Tests:** `tests/SillageTests.cpp` is a headless render harness run by CTest. Every
   DSP change needs a rendered-audio assertion, and the suite must pass in Release
   before pushing.
-- **EVS standards:** every user-facing parameter host-automatable; resizable UI;
-  pure-function UI (knobs look like knobs); Randomize never touches Mix, Output,
-  Freeze, or Wake mode; report latency honestly via `setLatencySamples` (0 unless a
+- **EVS standards:** every user-facing parameter host-automatable; resizable UI (the
+  panel is laid out once at 1280 px and scaled as a whole, fixed aspect); pure-function
+  UI (knobs look like knobs); Randomize never touches Mix, Output, Freeze, or Wake mode
+  (`randomize::kExcluded`); report latency honestly via `setLatencySamples` (0 unless a
   stage really adds lookahead).
 - **DSP invariants:** the feedback-loop limiter is what makes Feedback > 100 % and
   Chaos safe — never remove it or place color stages after it; the grain cap
@@ -26,3 +27,9 @@
 - **Parameter IDs** live only in `src/Parameters.h` (`params::id::…`); the editor
   builds its sections from ID tables in `src/PluginEditor.cpp`; keep the README
   parameter table current when the set changes.
+- **Wake / modulation:** `WakeEngine` (`src/Wake.h`) owns the shared `GrainEngine` and the
+  isolated instances; mod destinations resolve through `SillageAudioProcessor::modulated()`
+  (normalised offsets, `src/Modulation.h`) — read a modulatable parameter through that, not
+  `parameterValue()`, or the slot silently stops working for it.
+- **Releases:** push a `vX.Y.Z` tag; `.github/workflows/release.yml` builds the installers
+  (`installers/`) and attaches them to a GitHub Release.

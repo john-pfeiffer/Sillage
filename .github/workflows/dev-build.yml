@@ -43,6 +43,10 @@ jobs:
           cp -R build/Sillage_artefacts/Release/VST3/Sillage.vst3 "dist/Sillage-dev-$SHORTSHA-macos/"
           cp -R build/Sillage_artefacts/Release/AU/Sillage.component "dist/Sillage-dev-$SHORTSHA-macos/"
           cp -R "build/Sillage_artefacts/Release/Standalone/Sillage.app" "dist/Sillage-dev-$SHORTSHA-macos/"
+      - name: Build installer
+        run: |
+          VERSION="$(sed -n 's/^project(Sillage VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)-dev-$(git rev-parse --short HEAD)"
+          installers/macos/build-pkg.sh "$VERSION" build/Sillage_artefacts/Release dist
       - uses: actions/upload-artifact@v4
         with:
           name: sillage-dev-macos
@@ -65,6 +69,12 @@ jobs:
           mkdir -p "dist/Sillage-dev-$SHORTSHA-windows"
           cp -R build/Sillage_artefacts/Release/VST3/Sillage.vst3 "dist/Sillage-dev-$SHORTSHA-windows/"
           cp build/Sillage_artefacts/Release/Standalone/Sillage.exe "dist/Sillage-dev-$SHORTSHA-windows/"
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $base = (Select-String -Path CMakeLists.txt -Pattern 'project\(Sillage VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          $version = "$base-dev-$(git rev-parse --short HEAD)"
+          installers/windows/build-installer.ps1 -Version $version -BuildDir build/Sillage_artefacts/Release -OutDir dist
       - uses: actions/upload-artifact@v4
         with:
           name: sillage-dev-windows

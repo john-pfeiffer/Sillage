@@ -100,6 +100,36 @@ namespace id
     inline constexpr auto rewindLevel     = "rewindLevel";
     inline constexpr auto rewindPitch     = "rewindPitch";
     inline constexpr auto rewindManual    = "rewindManual";
+
+    // Wake (5.8)
+    inline constexpr auto wakeMode = "wakeMode";
+    inline constexpr auto displace = "displace";
+
+    // Modulation (5.9): six slots, each Source -> Destination with a bipolar
+    // Amount and a Curve, plus two LFOs and the Transient source's decay.
+    inline constexpr int kNumModSlots = 6;
+    inline constexpr int kNumLfos     = 2;
+
+    inline constexpr std::array<const char*, kNumModSlots> modSource {
+        "mod1Source", "mod2Source", "mod3Source", "mod4Source", "mod5Source", "mod6Source" };
+    inline constexpr std::array<const char*, kNumModSlots> modDestination {
+        "mod1Dest", "mod2Dest", "mod3Dest", "mod4Dest", "mod5Dest", "mod6Dest" };
+    inline constexpr std::array<const char*, kNumModSlots> modAmount {
+        "mod1Amount", "mod2Amount", "mod3Amount", "mod4Amount", "mod5Amount", "mod6Amount" };
+    inline constexpr std::array<const char*, kNumModSlots> modCurve {
+        "mod1Curve", "mod2Curve", "mod3Curve", "mod4Curve", "mod5Curve", "mod6Curve" };
+    inline constexpr auto modTransientDecay = "modTransientDecay";
+
+    inline constexpr std::array<const char*, kNumLfos> lfoShape    { "lfo1Shape",    "lfo2Shape" };
+    inline constexpr std::array<const char*, kNumLfos> lfoRate     { "lfo1Rate",     "lfo2Rate" };
+    inline constexpr std::array<const char*, kNumLfos> lfoSync     { "lfo1Sync",     "lfo2Sync" };
+    inline constexpr std::array<const char*, kNumLfos> lfoDivision { "lfo1Division", "lfo2Division" };
+    inline constexpr std::array<const char*, kNumLfos> lfoPhase    { "lfo1Phase",    "lfo2Phase" };
+
+    // Output (5.11): post-loop wet filters and stereo width.
+    inline constexpr auto width       = "width";
+    inline constexpr auto wetHighpass = "wetHighpass";
+    inline constexpr auto wetLowpass  = "wetLowpass";
 }
 
 // Musical divisions for synced Time, measured in beats (a quarter note = 1 beat).
@@ -172,6 +202,7 @@ inline double longDivisionSeconds (int index, double bpm, double barBeats) noexc
 }
 
 enum class RewindTrigger { timer = 0, transient, threshold, manual };
+enum class WakeMode { shared = 0, isolated };
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 } // namespace params

@@ -39,12 +39,15 @@ set(SILLAGE_SOURCES
     src/FeedbackPath.cpp
     src/GrainEngine.cpp
     src/LifetimeCurves.cpp
+    src/ModPanel.cpp
+    src/Modulation.cpp
     src/Modulators.cpp
     src/OnsetDetector.cpp
     src/Parameters.cpp
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
-    src/Randomize.cpp)
+    src/Randomize.cpp
+    src/Wake.cpp)
 
 target_sources(Sillage PRIVATE ${SILLAGE_SOURCES})
 target_include_directories(Sillage PRIVATE src)

@@ -107,26 +107,178 @@ constexpr double kRewindFadeSeconds = 0.02;
 constexpr double kReadGuard = 8.0;
 } // namespace
 
-void GrainEngine::prepare (double newSampleRate, int numChannels)
+// ---- RewindPlayer ------------------------------------------------------------
+
+void RewindPlayer::prepare (double newSampleRate, int numChannels)
 {
     sampleRate = newSampleRate;
     channels   = juce::jlimit (1, 2, numChannels);
-    capacity   = (int) std::ceil (kBufferSeconds * newSampleRate);
+    capacity   = (int) std::ceil (kRewindCaptureSeconds * newSampleRate);
+    ring.setSize (channels, capacity);
+    ageRing.assign ((size_t) capacity, 0.0f);
+    fadeStep = (float) (1.0 / (kRewindFadeSeconds * newSampleRate));
+    reset();
+}
+
+void RewindPlayer::reset()
+{
+    ring.clear();
+    std::fill (ageRing.begin(), ageRing.end(), 0.0f);
+    writePos = 0;
+    for (auto& voice : voices)
+        voice = {};
+}
+
+bool RewindPlayer::isPlaying() const noexcept
+{
+    for (const auto& voice : voices)
+        if (voice.active && ! voice.fadingOut)
+            return true;
+    return false;
+}
+
+float RewindPlayer::read (int channel, double position) const noexcept
+{
+    const auto* data = ring.getReadPointer (juce::jmin (channel, channels - 1));
+
+    auto index = (int) std::floor (position);
+    const auto frac = (float) (position - (double) index);
+    index %= capacity;
+    if (index < 0) index += capacity;
+    const auto next = index + 1 >= capacity ? 0 : index + 1;
+
+    return data[(size_t) index] + frac * (data[(size_t) next] - data[(size_t) index]);
+}
+
+void RewindPlayer::begin (double lengthSamples, double rate) noexcept
+{
+    if (capacity <= 0)
+        return;
+
+    // Rewinds do not stack: whatever is playing fades out over the crossfade
+    // while the new playback fades in from the most recent capture.
+    Voice* fresh = nullptr;
+    for (auto& voice : voices)
+    {
+        if (voice.active && ! voice.fadingOut)
+        {
+            voice.fadingOut = true;
+            voice.fadeStep  = -fadeStep;
+        }
+        else if (fresh == nullptr && (! voice.active || voice.fadingOut))
+        {
+            fresh = &voice;
+        }
+    }
+
+    if (fresh == nullptr)
+        fresh = &voices[0];
+
+    const auto length = juce::jlimit (1.0, kRewindMaxSeconds * sampleRate, lengthSamples);
+    const auto clampedRate = juce::jlimit (0.25, 4.0, rate);
+
+    fresh->active    = true;
+    fresh->fadingOut = false;
+    fresh->readPos   = (double) writePos - 1.0;
+    fresh->remaining = length / clampedRate;
+    fresh->fade      = 0.0f;
+    fresh->fadeStep  = fadeStep;
+}
+
+void RewindPlayer::capture (const float* frame, float ageSeconds) noexcept
+{
+    if (capacity <= 0)
+        return;
+
+    for (int channel = 0; channel < channels; ++channel)
+        ring.getWritePointer (channel)[writePos] = frame[juce::jmin (channel, 1)];
+    ageRing[(size_t) writePos] = ageSeconds;
+
+    if (++writePos >= capacity)
+        writePos = 0;
+}
+
+void RewindPlayer::render (float* out, float& ageAccum, float& weightAccum,
+                           float level, double rate, int activeChannels) noexcept
+{
+    if (capacity <= 0)
+        return;
+
+    const auto clampedRate   = juce::jlimit (0.25, 4.0, rate);
+    const auto invSampleRate = (float) (1.0 / sampleRate);
+
+    for (auto& voice : voices)
+    {
+        if (! voice.active)
+            continue;
+
+        const auto voiceLevel = voice.fade * level;
+        const auto left  = read (0, voice.readPos) * voiceLevel;
+        const auto right = (activeChannels > 1 ? read (1, voice.readPos) : read (0, voice.readPos)) * voiceLevel;
+        out[0] += left;
+        out[1] += right;
+
+        // Age of what is being rewound: captured age plus time since.
+        auto behind = writePos - (int) voice.readPos;
+        if (behind < 0) behind += capacity;
+        auto index = (int) voice.readPos % capacity;
+        if (index < 0) index += capacity;
+        const auto w = std::abs (left) + std::abs (right);
+        ageAccum    += w * (ageRing[(size_t) index] + (float) behind * invSampleRate);
+        weightAccum += w;
+
+        voice.readPos -= clampedRate;
+        while (voice.readPos < 0.0) voice.readPos += (double) capacity;
+        voice.remaining -= 1.0;
+
+        voice.fade += voice.fadeStep;
+        if (voice.fade >= 1.0f) { voice.fade = 1.0f; voice.fadeStep = 0.0f; }
+
+        // The capture head only ever approaches from behind; stop if it is
+        // about to overwrite what this voice is reading.
+        const auto overrun = behind >= capacity - 64;
+
+        if (voice.remaining <= 0.0 || overrun || (voice.fadingOut && voice.fade <= 0.0f))
+            voice.active = false;
+    }
+}
+
+// ---- GrainEngine -------------------------------------------------------------
+
+void GrainEngine::prepare (double newSampleRate, int numChannels, double bufferSeconds, bool withRewind)
+{
+    sampleRate = newSampleRate;
+    channels   = juce::jlimit (1, 2, numChannels);
+    capacity   = (int) std::ceil (juce::jmax (1.0, bufferSeconds) * newSampleRate);
 
     ring.setSize (channels, capacity);
     ageRing.assign ((size_t) capacity, 0.0f);
     feedbackHistory.setSize (channels, kFeedbackHistorySize);
     stealFadeStep = (float) (1.0 / (kStealFadeSeconds * newSampleRate));
 
-    rewindCapacity = (int) std::ceil (kRewindCaptureSeconds * newSampleRate);
-    rewindRing.setSize (channels, rewindCapacity);
-    rewindAgeRing.assign ((size_t) rewindCapacity, 0.0f);
-    rewindFadeStep = (float) (1.0 / (kRewindFadeSeconds * newSampleRate));
+    if (withRewind)
+        rewind.prepare (newSampleRate, channels);
 
     feedbackSmoothed.reset (newSampleRate, 0.02);
 
     feedbackPath.prepare (newSampleRate, channels);
     reset();
+}
+
+void GrainEngine::primeInput (const float* const* input, int numChannels, int numSamples) noexcept
+{
+    for (int i = 0; i < numSamples; ++i)
+    {
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            ring.getWritePointer (channel)[writePos] = input[juce::jmin (channel, numChannels - 1)][i];
+            feedbackHistory.setSample (channel, writePos & (kFeedbackHistorySize - 1), 0.0f);
+        }
+        ageRing[(size_t) writePos] = 0.0f;
+
+        if (++writePos >= capacity)
+            writePos = 0;
+    }
 }
 
 void GrainEngine::reset()
@@ -150,12 +302,8 @@ void GrainEngine::reset()
     chokeSamplesLeft      = 0;
     chokePositionsLeft    = 0;
 
-    rewindRing.clear();
-    std::fill (rewindAgeRing.begin(), rewindAgeRing.end(), 0.0f);
-    rewindWritePos  = 0;
+    rewind.reset();
     rewindRequested = false;
-    for (auto& voice : rewindVoices)
-        voice = {};
 
     averageAgeSeconds.store (0.0f);
 
@@ -165,10 +313,7 @@ void GrainEngine::reset()
 
 bool GrainEngine::isRewinding() const noexcept
 {
-    for (const auto& voice : rewindVoices)
-        if (voice.active && ! voice.fadingOut)
-            return true;
-    return false;
+    return rewind.isPlaying();
 }
 
 float GrainEngine::readInterpolated (int channel, double position) const noexcept
@@ -237,40 +382,72 @@ GrainEngine::GrainShape GrainEngine::resolveShape (const Settings& settings, flo
     GrainShape shape;
     shape.lengthSamples      = juce::jmax (1.0, settings.sizeSamples);
     shape.pitchOffset        = 0.0f;
+    shape.pitchSpread        = settings.pitchSpread;
     shape.reverseProbability = settings.reverseProbability;
     shape.panSpread          = settings.panSpread;
     shape.level              = 1.0f;
 
-    if (settings.curves == nullptr)
-        return shape;
-
-    using lifetime::Destination;
     const auto normalised = juce::jlimit (0.0f, 1.0f,
                                           ageSeconds / (float) juce::jmax (0.001, settings.lifetimeSeconds));
-    const auto enabled = [&] (Destination d) { return settings.curveEnabled[(size_t) d]; };
-    const auto value   = [&] (Destination d) { return settings.curves->curves[(size_t) d].evaluate (normalised); };
 
-    if (enabled (Destination::grainSize))
-        shape.lengthSamples = juce::jmax (1.0, lifetime::grainSizeMs (value (Destination::grainSize)) * 0.001 * sampleRate);
-    if (enabled (Destination::pitchOffset))
-        shape.pitchOffset = lifetime::pitchSemitones (value (Destination::pitchOffset));
-    if (enabled (Destination::reverse))
-        shape.reverseProbability = value (Destination::reverse);
-    if (enabled (Destination::panSpread))
-        shape.panSpread = value (Destination::panSpread);
-    if (enabled (Destination::level))
-        shape.level = value (Destination::level);
+    if (settings.curves != nullptr)
+    {
+        using lifetime::Destination;
+        const auto enabled = [&] (Destination d) { return settings.curveEnabled[(size_t) d]; };
+        const auto value   = [&] (Destination d) { return settings.curves->curves[(size_t) d].evaluate (normalised); };
+
+        if (enabled (Destination::grainSize))
+            shape.lengthSamples = juce::jmax (1.0, lifetime::grainSizeMs (value (Destination::grainSize)) * 0.001 * sampleRate);
+        if (enabled (Destination::pitchOffset))
+            shape.pitchOffset = lifetime::pitchSemitones (value (Destination::pitchOffset));
+        if (enabled (Destination::reverse))
+            shape.reverseProbability = value (Destination::reverse);
+        if (enabled (Destination::panSpread))
+            shape.panSpread = value (Destination::panSpread);
+        if (enabled (Destination::level))
+            shape.level = value (Destination::level);
+    }
+
+    // Per-grain Age modulation (5.9): each slot adds amount * curve(age) in
+    // the destination parameter's normalised range, on top of whatever the
+    // curve or the knob resolved to.
+    if (settings.numAgeMods > 0)
+    {
+        std::array<float, mod::kNumPerGrain> offsets {};
+        for (int m = 0; m < settings.numAgeMods; ++m)
+        {
+            const auto& slot = settings.ageMods[(size_t) m];
+            offsets[(size_t) slot.perGrain] += slot.amount * mod::shape (normalised, slot.curve);
+        }
+
+        const auto apply = [&] (mod::PerGrain d, float plain) -> float
+        {
+            const auto* range = settings.perGrainRanges[(size_t) d];
+            const auto offset = offsets[(size_t) d];
+            return (range == nullptr || std::abs (offset) < 1.0e-6f) ? plain : mod::applyOffset (*range, plain, offset);
+        };
+
+        const auto sizeMs = (float) (shape.lengthSamples * 1000.0 / sampleRate);
+        shape.lengthSamples = juce::jmax (1.0, (double) apply (mod::PerGrain::size, sizeMs) * 0.001 * sampleRate);
+
+        const auto basePitch = settings.pitchSemitones + shape.pitchOffset;
+        shape.pitchOffset  += apply (mod::PerGrain::pitch, basePitch) - basePitch;
+
+        shape.pitchSpread        = apply (mod::PerGrain::pitchSpread, shape.pitchSpread * 100.0f) * 0.01f;
+        shape.panSpread          = apply (mod::PerGrain::panSpread, shape.panSpread * 100.0f) * 0.01f;
+        shape.reverseProbability = apply (mod::PerGrain::reverse, shape.reverseProbability * 100.0f) * 0.01f;
+    }
 
     return shape;
 }
 
-float GrainEngine::resolvePitchRate (const Settings& settings, float pitchOffset) noexcept
+float GrainEngine::resolvePitchRate (const Settings& settings, const GrainShape& shape) noexcept
 {
     // Pitch resolves once, at birth, and holds for the grain's life. Chaos and
     // the Lifetime curve land before Quantize so the result still snaps.
-    auto semitones = settings.pitchSemitones + settings.pitchModSemitones + pitchOffset;
-    if (settings.pitchSpread > 0.0f)
-        semitones += settings.pitchSpread * 12.0f * (rng.nextFloat() * 2.0f - 1.0f);
+    auto semitones = settings.pitchSemitones + settings.pitchModSemitones + shape.pitchOffset;
+    if (shape.pitchSpread > 0.0f)
+        semitones += shape.pitchSpread * 12.0f * (rng.nextFloat() * 2.0f - 1.0f);
     semitones = scales::snapToScale (semitones, settings.quantize, settings.quantizeRoot);
 
     return (float) std::pow (2.0, (double) semitones / 12.0);
@@ -279,7 +456,7 @@ float GrainEngine::resolvePitchRate (const Settings& settings, float pitchOffset
 void GrainEngine::activateGrain (double startPos, double rate, const Settings& settings,
                                  const GrainShape& shape, float gainScale, float ageSeconds)
 {
-    if (activeGrains >= kMaxGrains)
+    if (activeGrains >= grainCap)
     {
         // At the cap: steal the oldest sounding grain. It keeps its slot while
         // it fades over a couple of milliseconds — a fade, not a click — but it
@@ -393,7 +570,7 @@ void GrainEngine::spawnScheduledGrain (const Settings& settings)
     const auto ageSeconds = ageOfRegion ((double) writePos - probeOffset, juce::jmax (1.0, settings.sizeSamples));
     const auto shape      = resolveShape (settings, ageSeconds);
 
-    const auto rate     = (double) resolvePitchRate (settings, shape.pitchOffset);
+    const auto rate     = (double) resolvePitchRate (settings, shape);
     const auto reversed = shape.reverseProbability > 0.0f
                        && rng.nextFloat() < shape.reverseProbability;
 
@@ -424,7 +601,7 @@ void GrainEngine::spawnBurstGrain (const Settings& settings)
 
     const auto ageSeconds = ageOfRegion (burst.hitPos, juce::jmax (1.0, settings.sizeSamples));
     const auto shape      = resolveShape (settings, ageSeconds);
-    const auto rate       = (double) resolvePitchRate (settings, shape.pitchOffset);
+    const auto rate       = (double) resolvePitchRate (settings, shape);
     const auto length     = juce::jmax (1.0, shape.lengthSamples);
 
     const auto minOffset = kReadGuard + juce::jmax (0.0, length * (rate - 1.0));
@@ -504,49 +681,9 @@ void GrainEngine::advanceChoke() noexcept
     --chokeSamplesLeft;
 }
 
-float GrainEngine::readRewind (int channel, double position) const noexcept
-{
-    const auto* data = rewindRing.getReadPointer (juce::jmin (channel, channels - 1));
-
-    auto index = (int) std::floor (position);
-    const auto frac = (float) (position - (double) index);
-    index %= rewindCapacity;
-    if (index < 0) index += rewindCapacity;
-    const auto next = index + 1 >= rewindCapacity ? 0 : index + 1;
-
-    return data[(size_t) index] + frac * (data[(size_t) next] - data[(size_t) index]);
-}
-
 void GrainEngine::beginRewind (const Settings& settings) noexcept
 {
-    // Rewinds do not stack: whatever is playing fades out over the crossfade
-    // while the new playback fades in from the most recent capture.
-    RewindVoice* fresh = nullptr;
-    for (auto& voice : rewindVoices)
-    {
-        if (voice.active && ! voice.fadingOut)
-        {
-            voice.fadingOut = true;
-            voice.fadeStep  = -rewindFadeStep;
-        }
-        else if (fresh == nullptr && (! voice.active || voice.fadingOut))
-        {
-            fresh = &voice;
-        }
-    }
-
-    if (fresh == nullptr)
-        fresh = &rewindVoices[0];
-
-    const auto length = juce::jlimit (1.0, kRewindMaxSeconds * sampleRate, settings.rewindLengthSamples);
-    const auto rate   = juce::jlimit (0.25, 4.0, settings.rewindRate);
-
-    fresh->active    = true;
-    fresh->fadingOut = false;
-    fresh->readPos   = (double) rewindWritePos - 1.0;
-    fresh->remaining = length / rate;
-    fresh->fade      = 0.0f;
-    fresh->fadeStep  = rewindFadeStep;
+    rewind.begin (settings.rewindLengthSamples, settings.rewindRate);
 }
 
 void GrainEngine::process (const float* const* input,
@@ -556,7 +693,9 @@ void GrainEngine::process (const float* const* input,
                            const Settings& settings,
                            const int* onsets,
                            int numOnsets,
-                           const TransientResponse& response)
+                           const TransientResponse& response,
+                           const float* const* inject,
+                           const float* injectAge)
 {
     const auto active   = juce::jmin (numChannels, channels);
     const auto& tables  = windowTables();
@@ -584,7 +723,7 @@ void GrainEngine::process (const float* const* input,
             beginRewind (settings);
     }
 
-    const auto rewindRate = juce::jlimit (0.25, 4.0, settings.rewindRate);
+    const auto rewindActive = settings.rewindOn && rewind.isPrepared();
 
     double blockAgeSum = 0.0, blockWeightSum = 0.0;
     int onsetIndex = 0;
@@ -597,7 +736,7 @@ void GrainEngine::process (const float* const* input,
                 beginBurst (response);
             if (response.choke)
                 beginChoke (response);
-            if (response.rewind && settings.rewindOn)
+            if (response.rewind && rewindActive)
                 beginRewind (settings);
             ++onsetIndex;
         }
@@ -704,49 +843,23 @@ void GrainEngine::process (const float* const* input,
         float rewindOut[2] { 0.0f, 0.0f };
         float rewindAge = 0.0f, rewindWeight = 0.0f;
 
-        if (settings.rewindOn)
+        if (rewindActive)
         {
-            for (int channel = 0; channel < channels; ++channel)
-                rewindRing.getWritePointer (channel)[rewindWritePos] = sum[juce::jmin (channel, 1)];
-            rewindAgeRing[(size_t) rewindWritePos] = sampleAge;
+            rewind.capture (sum, sampleAge);
+            rewind.render (rewindOut, rewindAge, rewindWeight, settings.rewindLevel, settings.rewindRate, active);
+        }
 
-            for (auto& voice : rewindVoices)
-            {
-                if (! voice.active)
-                    continue;
-
-                const auto level = voice.fade * settings.rewindLevel;
-                float voiceOut[2] { readRewind (0, voice.readPos) * level,
-                                    (active > 1 ? readRewind (1, voice.readPos) : readRewind (0, voice.readPos)) * level };
-                rewindOut[0] += voiceOut[0];
-                rewindOut[1] += voiceOut[1];
-
-                // Age of what is being rewound: captured age plus time since.
-                auto behind = rewindWritePos - (int) voice.readPos;
-                if (behind < 0) behind += rewindCapacity;
-                auto index = (int) voice.readPos % rewindCapacity;
-                if (index < 0) index += rewindCapacity;
-                const auto w = std::abs (voiceOut[0]) + std::abs (voiceOut[1]);
-                rewindAge    += w * (rewindAgeRing[(size_t) index] + (float) behind * invSampleRate);
-                rewindWeight += w;
-
-                voice.readPos -= rewindRate;
-                while (voice.readPos < 0.0) voice.readPos += (double) rewindCapacity;
-                voice.remaining -= 1.0;
-
-                voice.fade += voice.fadeStep;
-                if (voice.fade >= 1.0f) { voice.fade = 1.0f; voice.fadeStep = 0.0f; }
-
-                // The capture head only ever approaches from behind; stop if it
-                // is about to overwrite what this voice is reading.
-                const auto overrun = behind >= rewindCapacity - 64;
-
-                if (voice.remaining <= 0.0 || overrun || (voice.fadingOut && voice.fade <= 0.0f))
-                    voice.active = false;
-            }
-
-            if (++rewindWritePos >= rewindCapacity)
-                rewindWritePos = 0;
+        // Anything injected from outside (an isolated instance's Rewind)
+        // takes the same route.
+        if (inject != nullptr)
+        {
+            const auto injectLeft  = inject[0][i];
+            const auto injectRight = active > 1 ? inject[1][i] : injectLeft;
+            rewindOut[0] += injectLeft;
+            rewindOut[1] += injectRight;
+            const auto w = std::abs (injectLeft) + std::abs (injectRight);
+            rewindAge    += w * (injectAge != nullptr ? injectAge[i] : 0.0f);
+            rewindWeight += w;
         }
 
         // Feedback: grain sum -> colour stages -> limiter -> buffer. The path

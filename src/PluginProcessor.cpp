@@ -16,6 +16,8 @@ constexpr float kChaosShimmerCents    = 50.0f;
 // Rewind threshold hysteresis: the tail has to come back up this far above the
 // threshold before a falling crossing can fire again.
 constexpr float kRewindRearmDb = 6.0f;
+
+const juce::Identifier kPresetNameProperty { "presetName" };
 } // namespace
 
 SillageAudioProcessor::SillageAudioProcessor()
@@ -26,6 +28,11 @@ SillageAudioProcessor::SillageAudioProcessor()
 {
     apvts.addParameterListener (params::id::panic, this);
     apvts.addParameterListener (params::id::rewindManual, this);
+
+    // Modulation destinations resolve through their parameter's own range.
+    for (int d = 0; d < mod::kNumDestinations; ++d)
+        if (const auto* id = mod::destinationParameterId ((mod::Destination) d))
+            destinationParams[(size_t) d] = apvts.getParameter (id);
 
     ensureCurvesInState();
     publishCurves();
@@ -80,7 +87,63 @@ void SillageAudioProcessor::publishCurves()
 float SillageAudioProcessor::getAverageAgeNormalised() const noexcept
 {
     const auto lifetimeSeconds = juce::jmax (0.001f, parameterValue (params::id::lifetime) * 0.001f);
-    return juce::jlimit (0.0f, 1.0f, engine.getAverageAgeSeconds() / lifetimeSeconds);
+    return juce::jlimit (0.0f, 1.0f, wake.getAverageAgeSeconds() / lifetimeSeconds);
+}
+
+// ---- Presets -----------------------------------------------------------------
+
+juce::File SillageAudioProcessor::getPresetDirectory()
+{
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+               .getChildFile ("Elan Vital Studios").getChildFile ("Sillage").getChildFile ("Presets");
+}
+
+juce::String SillageAudioProcessor::getPresetName() const
+{
+    return apvts.state.getProperty (kPresetNameProperty, "Init").toString();
+}
+
+void SillageAudioProcessor::setPresetName (const juce::String& name)
+{
+    apvts.state.setProperty (kPresetNameProperty, name, nullptr);
+}
+
+bool SillageAudioProcessor::savePreset (const juce::File& file)
+{
+    setPresetName (file.getFileNameWithoutExtension());
+
+    auto xml = apvts.copyState().createXml();
+    if (xml == nullptr)
+        return false;
+
+    file.getParentDirectory().createDirectory();
+    return xml->writeTo (file);
+}
+
+bool SillageAudioProcessor::loadPreset (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return false;
+
+    apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    ensureCurvesInState();
+    publishCurves();
+    setPresetName (file.getFileNameWithoutExtension());
+    return true;
+}
+
+void SillageAudioProcessor::resetToDefaults()
+{
+    for (auto* parameter : getParameters())
+    {
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost (parameter->getDefaultValue());
+        parameter->endChangeGesture();
+    }
+
+    setCurves (lifetime::defaultCurveSet());
+    setPresetName ("Init");
 }
 
 // ---- Lifecycle ---------------------------------------------------------------
@@ -93,13 +156,25 @@ void SillageAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     mixSmoothed.reset (sampleRate, 0.02);
     outputGainSmoothed.reset (sampleRate, 0.02);
+    widthSmoothed.reset (sampleRate, 0.02);
 
     const auto channels = juce::jmax (1, getTotalNumOutputChannels());
-    engine.prepare (sampleRate, channels);
+    wake.prepare (sampleRate, channels, samplesPerBlock);
     onsetDetector.prepare (sampleRate);
     envelopeFollower.prepare (sampleRate);
     chaosModulator.prepare (sampleRate);
     duck.prepare (sampleRate);
+
+    for (auto& lfo : lfos)
+        lfo.prepare (sampleRate);
+    transientEnvelope.prepare (sampleRate);
+    modRandom.prepare (sampleRate, modRng);
+
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), (juce::uint32) channels };
+    wetHighpass.prepare (spec);
+    wetHighpass.setType (juce::dsp::StateVariableTPTFilterType::highpass);
+    wetLowpass.prepare (spec);
+    wetLowpass.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
 
     rewindTimerLeft      = 0.0;
     rewindThresholdArmed = false;
@@ -135,6 +210,7 @@ void SillageAudioProcessor::updateTransport()
 {
     auto bpm = (double) parameterValue (params::id::fallbackBpm);
     auto beatsPerBar = 4.0;
+    auto hostTime = -1.0;
 
     if (auto* playhead = getPlayHead())
     {
@@ -148,22 +224,108 @@ void SillageAudioProcessor::updateTransport()
                 if (signature->numerator > 0 && signature->denominator > 0)
                     beatsPerBar = 4.0 * (double) signature->numerator
                                       / (double) signature->denominator;
+
+            // Synced LFOs lock to the transport while it runs.
+            if (position->getIsPlaying())
+            {
+                if (auto seconds = position->getTimeInSeconds())
+                    hostTime = *seconds;
+                else if (auto ppq = position->getPpqPosition())
+                    hostTime = *ppq * 60.0 / juce::jmax (1.0, bpm);
+            }
         }
     }
 
     effectiveBpm.store (bpm);
     barBeats.store (beatsPerBar);
+    hostTimeSeconds.store (hostTime);
 }
 
 double SillageAudioProcessor::resolveTimeSeconds() const
 {
-    double timeSeconds = (double) parameterValue (params::id::time) * 0.001;
+    double timeSeconds = (double) modulated (mod::Destination::time) * 0.001;
     if (parameterValue (params::id::timeSync) >= 0.5f)
         timeSeconds = params::divisionSeconds ((int) parameterValue (params::id::timeDivision),
                                                effectiveBpm.load(), barBeats.load());
 
     // Never ask for more delay than the buffer holds.
     return juce::jlimit (0.001, kBufferSeconds * 0.98, timeSeconds);
+}
+
+// ---- Modulation --------------------------------------------------------------
+
+float SillageAudioProcessor::modulated (mod::Destination destination) const noexcept
+{
+    const auto* param = destinationParams[(size_t) destination];
+    if (param == nullptr)
+        return 0.0f;
+
+    const auto offset = modOffsets[(size_t) destination];
+    if (std::abs (offset) < 1.0e-6f)
+        return param->convertFrom0to1 (param->getValue());
+
+    return param->convertFrom0to1 (juce::jlimit (0.0f, 1.0f, param->getValue() + offset));
+}
+
+void SillageAudioProcessor::updateModulation (int numSamples, float envelope, int numOnsets)
+{
+    // Sources, all 0..1 at the end of this block.
+    const auto lifetimeSeconds = juce::jmax (0.001f, parameterValue (params::id::lifetime) * 0.001f);
+    sources.ageNormalised = juce::jlimit (0.0f, 1.0f, wake.getAverageAgeSeconds() / lifetimeSeconds);
+    sources.envelope      = juce::jlimit (0.0f, 1.0f, envelope);
+
+    if (numOnsets > 0)
+        transientEnvelope.trigger();
+    sources.transient = transientEnvelope.advance (numSamples, (double) parameterValue (params::id::modTransientDecay) * 0.001);
+
+    sources.chaos = modRandom.advance (numSamples, modRng) * 0.5f + 0.5f;
+
+    const auto bpm      = effectiveBpm.load();
+    const auto bar      = barBeats.load();
+    const auto hostTime = hostTimeSeconds.load();
+
+    for (size_t l = 0; l < lfos.size(); ++l)
+    {
+        const auto synced = parameterValue (params::id::lfoSync[l]) >= 0.5f;
+        auto hz = (double) parameterValue (params::id::lfoRate[l]);
+        if (synced)
+        {
+            const auto seconds = juce::jmax (1.0e-3, params::divisionSeconds ((int) parameterValue (params::id::lfoDivision[l]), bpm, bar));
+            hz = 1.0 / seconds;
+            if (hostTime >= 0.0)
+                lfos[l].setPhase (hostTime / seconds);
+        }
+
+        const auto shape = (mod::LfoShape) juce::jlimit (0, (int) mod::LfoShape::count - 1, (int) parameterValue (params::id::lfoShape[l]));
+        const auto value = lfos[l].advance (numSamples, hz, parameterValue (params::id::lfoPhase[l]) / 360.0f, shape);
+        if (l == 0) sources.lfo1 = value;
+        else        sources.lfo2 = value;
+    }
+
+    // Slots: global destinations sum into normalised offsets; per-grain Age on
+    // a per-grain destination is handed to the engine to resolve at birth.
+    modOffsets.fill (0.0f);
+    numAgeMods = 0;
+
+    for (size_t s = 0; s < params::id::modSource.size(); ++s)
+    {
+        const auto source      = (mod::Source) juce::jlimit (0, mod::kNumSources - 1, (int) parameterValue (params::id::modSource[s]));
+        const auto destination = (mod::Destination) juce::jlimit (0, mod::kNumDestinations - 1, (int) parameterValue (params::id::modDestination[s]));
+        const auto amount      = parameterValue (params::id::modAmount[s]) * 0.01f;
+        const auto curve       = (mod::Curve) juce::jlimit (0, (int) mod::Curve::count - 1, (int) parameterValue (params::id::modCurve[s]));
+
+        if (source == mod::Source::none || destination == mod::Destination::none || std::abs (amount) < 1.0e-6f)
+            continue;
+
+        const auto perGrain = mod::perGrainIndex (destination);
+        if (source == mod::Source::agePerGrain && perGrain >= 0)
+        {
+            ageMods[(size_t) numAgeMods++] = { perGrain, amount, curve };
+            continue;
+        }
+
+        modOffsets[(size_t) destination] += amount * mod::shape (sources.get (source), curve);
+    }
 }
 
 // ---- Settings ----------------------------------------------------------------
@@ -183,34 +345,34 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
 
     // Density: Chaos wanders it ±50 %, the input envelope scales it up to an
     // octave either way — positive means hits dense, sustains sparse.
-    auto density = (double) parameterValue (params::id::density);
+    auto density = (double) modulated (mod::Destination::density);
     density *= 1.0 + (double) (chaosAmt * chaos.density * kChaosDensityRange);
     if (const auto envDensity = parameterValue (params::id::envDensity) * 0.01f; std::abs (envDensity) > 1.0e-6f)
         density *= std::pow (2.0, (double) (envDensity * bipolar));
     settings.density = juce::jlimit (0.5, 500.0, density);
 
-    auto spread = parameterValue (params::id::spread) * 0.01f;
+    auto spread = modulated (mod::Destination::spread) * 0.01f;
     spread += parameterValue (params::id::envSpread) * 0.01f * bipolar * 0.5f;
     settings.spread = juce::jlimit (0.0f, 1.0f, spread);
 
-    settings.sizeSamples = (double) parameterValue (params::id::size) * 0.001 * currentSampleRate;
+    settings.sizeSamples = (double) modulated (mod::Destination::size) * 0.001 * currentSampleRate;
     settings.window      = (WindowShape) juce::jlimit (
         0, (int) WindowShape::numShapes - 1, (int) parameterValue (params::id::window));
 
     // Chaos only ever pushes feedback up; at 100 % the loop goes past unity on
     // purpose and the limiter is what keeps that musical.
-    settings.feedback = parameterValue (params::id::feedback) * 0.01f
+    settings.feedback = modulated (mod::Destination::feedback) * 0.01f
                       + chaosAmt * kChaosFeedbackBoost * (chaos.feedback + 1.0f) * 0.5f;
 
-    settings.pitchSemitones    = parameterValue (params::id::pitch)
+    settings.pitchSemitones    = modulated (mod::Destination::pitch)
                                + parameterValue (params::id::pitchFine) * 0.01f;
     settings.pitchModSemitones = chaosAmt * chaos.pitch * kChaosPitchSemitones;
-    settings.pitchSpread       = parameterValue (params::id::pitchSpread) * 0.01f;
+    settings.pitchSpread       = modulated (mod::Destination::pitchSpread) * 0.01f;
     settings.quantize          = (scales::Scale) juce::jlimit (
         0, (int) scales::Scale::numScales - 1, (int) parameterValue (params::id::quantize));
     settings.quantizeRoot      = juce::jlimit (0, 11, (int) parameterValue (params::id::quantizeRoot));
-    settings.panSpread         = parameterValue (params::id::panSpread) * 0.01f;
-    settings.reverseProbability = parameterValue (params::id::reverse) * 0.01f;
+    settings.panSpread         = modulated (mod::Destination::panSpread) * 0.01f;
+    settings.reverseProbability = modulated (mod::Destination::reverse) * 0.01f;
 
     settings.freeze            = parameterValue (params::id::freeze) >= 0.5f;
     settings.freezeFadeSamples = (double) parameterValue (params::id::freezeFade) * 0.001 * currentSampleRate;
@@ -229,8 +391,22 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     // Rewind (5.7).
     settings.rewindOn            = parameterValue (params::id::rewindOn) >= 0.5f;
     settings.rewindLengthSamples = (double) parameterValue (params::id::rewindLength) * 0.001 * currentSampleRate;
-    settings.rewindLevel         = parameterValue (params::id::rewindLevel) * 0.01f;
+    settings.rewindLevel         = modulated (mod::Destination::rewindLevel) * 0.01f;
     settings.rewindRate          = std::pow (2.0, (double) parameterValue (params::id::rewindPitch) / 12.0);
+
+    // Per-grain Age modulation (5.9).
+    settings.ageMods    = ageMods;
+    settings.numAgeMods = numAgeMods;
+    const auto rangeOf = [this] (mod::Destination d) -> const juce::NormalisableRange<float>*
+    {
+        const auto* param = destinationParams[(size_t) d];
+        return param != nullptr ? &param->getNormalisableRange() : nullptr;
+    };
+    settings.perGrainRanges[(size_t) mod::PerGrain::size]        = rangeOf (mod::Destination::size);
+    settings.perGrainRanges[(size_t) mod::PerGrain::pitch]       = rangeOf (mod::Destination::pitch);
+    settings.perGrainRanges[(size_t) mod::PerGrain::pitchSpread] = rangeOf (mod::Destination::pitchSpread);
+    settings.perGrainRanges[(size_t) mod::PerGrain::panSpread]   = rangeOf (mod::Destination::panSpread);
+    settings.perGrainRanges[(size_t) mod::PerGrain::reverse]     = rangeOf (mod::Destination::reverse);
 
     return settings;
 }
@@ -239,8 +415,8 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
 {
     FeedbackPath::Settings settings;
 
-    settings.highpassHz = parameterValue (params::id::fbHighpass);
-    settings.lowpassHz  = parameterValue (params::id::fbLowpass);
+    settings.highpassHz = modulated (mod::Destination::loopHighpass);
+    settings.lowpassHz  = modulated (mod::Destination::loopLowpass);
     settings.resonance  = parameterValue (params::id::fbResonance) * 0.01f;
 
     const auto index    = juce::jlimit (0, (int) kShimmerIntervals.size() - 1,
@@ -248,7 +424,7 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     const auto chaosAmt = parameterValue (params::id::chaos) * 0.01f;
 
     auto shimmer = kShimmerIntervals[(size_t) index]
-                 + (parameterValue (params::id::shimmerFine)
+                 + (modulated (mod::Destination::shimmerFine)
                     + chaosAmt * chaos.shimmerFine * kChaosShimmerCents) * 0.01f;
 
     // Handoff open question 5: when Quantize is on the loop shimmer snaps too,
@@ -260,10 +436,10 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
                                        juce::jlimit (0, 11, (int) parameterValue (params::id::quantizeRoot)));
 
     settings.shimmerSemitones = shimmer;
-    settings.shimmerAmount    = parameterValue (params::id::shimmerAmount) * 0.01f;
-    settings.diffuse          = parameterValue (params::id::diffuse) * 0.01f;
+    settings.shimmerAmount    = modulated (mod::Destination::shimmerAmount) * 0.01f;
+    settings.diffuse          = modulated (mod::Destination::diffuse) * 0.01f;
     settings.satType          = juce::jlimit (0, 2, (int) parameterValue (params::id::satType));
-    settings.drive            = parameterValue (params::id::drive) * 0.01f;
+    settings.drive            = modulated (mod::Destination::drive) * 0.01f;
 
     // Global Lifetime Curve destinations resolve from the average age of the
     // live grains (5.9): the loop filters are replaced while their curve is
@@ -280,11 +456,11 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     if (curveOn (Destination::sampleRate)) settings.baseSampleRateHz = lifetime::sampleRateHz (curveAt (Destination::sampleRate), currentSampleRate);
 
     // Per-pass Degrade (5.6 A).
-    settings.degradeBitsPerPass   = parameterValue (params::id::degradeBits);
-    settings.degradeRatePerPass   = parameterValue (params::id::degradeRate) * 0.01f;
-    settings.degradeNoise         = parameterValue (params::id::degradeNoise) * 0.01f;
-    settings.degradeTiltHzPerPass = parameterValue (params::id::degradeTilt);
-    settings.degradeDriftCents    = parameterValue (params::id::degradeDrift);
+    settings.degradeBitsPerPass   = modulated (mod::Destination::degradeBits);
+    settings.degradeRatePerPass   = modulated (mod::Destination::degradeRate) * 0.01f;
+    settings.degradeNoise         = modulated (mod::Destination::degradeNoise) * 0.01f;
+    settings.degradeTiltHzPerPass = modulated (mod::Destination::degradeTilt);
+    settings.degradeDriftCents    = modulated (mod::Destination::degradeDrift);
     settings.driftDirection       = juce::jlimit (0, 2, (int) parameterValue (params::id::degradeDriftDir));
     settings.passSeconds          = resolveTimeSeconds();
 
@@ -320,6 +496,15 @@ GrainEngine::TransientResponse SillageAudioProcessor::resolveTransientResponse()
                           == params::RewindTrigger::transient;
 
     return response;
+}
+
+WakeEngine::Settings SillageAudioProcessor::resolveWakeSettings() const
+{
+    WakeEngine::Settings settings;
+    settings.isolated            = (params::WakeMode) (int) parameterValue (params::id::wakeMode) == params::WakeMode::isolated;
+    settings.displace            = juce::jlimit (0.0f, 1.0f, modulated (mod::Destination::displace) * 0.01f);
+    settings.displaceFadeSamples = (double) parameterValue (params::id::chokeFade) * 0.001 * currentSampleRate;
+    return settings;
 }
 
 void SillageAudioProcessor::updateRewindTriggers (int numSamples)
@@ -365,7 +550,7 @@ void SillageAudioProcessor::updateRewindTriggers (int numSamples)
     }
 
     if (fire && rewindOn)
-        engine.triggerRewind();
+        wake.triggerRewind();
 }
 
 // ---- Processing --------------------------------------------------------------
@@ -383,10 +568,13 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     if (panicRequested.exchange (false))
     {
-        engine.reset();
+        wake.reset();
         duck.reset();
         onsetDetector.reset();
         envelopeFollower.reset();
+        transientEnvelope.reset();
+        wetHighpass.reset();
+        wetLowpass.reset();
         wetLevelDb           = -120.0f;
         rewindThresholdArmed = false;
     }
@@ -403,15 +591,18 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const auto envelope  = envelopeFollower.process (buffer.getArrayOfReadPointers(), numOut, numSamples);
     const auto chaos     = chaosModulator.advance (numSamples);
 
+    updateModulation (numSamples, envelope, numOnsets);
+
     wetBuffer.setSize (numOut, numSamples, false, false, true);
 
-    engine.getFeedbackPath().setSettings (resolveFeedbackSettings (chaos));
-    engine.process (buffer.getArrayOfReadPointers(),
-                    wetBuffer.getArrayOfWritePointers(),
-                    numOut, numSamples,
-                    resolveGrainSettings (chaos, envelope),
-                    onsetOffsets.data(), numOnsets,
-                    resolveTransientResponse());
+    wake.setFeedbackSettings (resolveFeedbackSettings (chaos));
+    wake.process (buffer.getArrayOfReadPointers(),
+                  wetBuffer.getArrayOfWritePointers(),
+                  numOut, numSamples,
+                  resolveGrainSettings (chaos, envelope),
+                  resolveWakeSettings(),
+                  onsetOffsets.data(), numOnsets,
+                  resolveTransientResponse());
 
     // Wet level for the Rewind threshold trigger, smoothed over ~50 ms.
     {
@@ -427,9 +618,20 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         wetLevelDb += (rmsDb - wetLevelDb) * blockCoeff;
     }
 
-    mixSmoothed.setTargetValue (parameterValue (params::id::mix) * 0.01f);
+    // Post-loop wet stage (5.11): HP/LP outside the loop, then Width. Either
+    // filter at its end stop is bypassed outright rather than left to colour
+    // the tail with a near-transparent pole.
+    const auto wetHp = parameterValue (params::id::wetHighpass);
+    const auto wetLp = parameterValue (params::id::wetLowpass);
+    const auto useHp = wetHp > 20.5f;
+    const auto useLp = wetLp < 19990.0f;
+    if (useHp) wetHighpass.setCutoffFrequency (juce::jlimit (20.0f, (float) (currentSampleRate * 0.45), wetHp));
+    if (useLp) wetLowpass.setCutoffFrequency  (juce::jlimit (20.0f, (float) (currentSampleRate * 0.45), wetLp));
+
+    mixSmoothed.setTargetValue (modulated (mod::Destination::mix) * 0.01f);
     outputGainSmoothed.setTargetValue (
         juce::Decibels::decibelsToGain (parameterValue (params::id::output)));
+    widthSmoothed.setTargetValue (parameterValue (params::id::width) * 0.01f);
 
     const auto ducking   = parameterValue (params::id::duckOn) >= 0.5f;
     const auto duckDepth = parameterValue (params::id::duckDepth) * 0.01f;
@@ -449,6 +651,23 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         // Duck sits on the wet signal ahead of Mix, per the signal-flow diagram.
         const auto duckGain = ducking ? duck.next (duckDepth) : duck.next (0.0f);
 
+        float wet[2] { wetBuffer.getSample (0, i), numOut > 1 ? wetBuffer.getSample (1, i) : 0.0f };
+
+        for (int channel = 0; channel < numOut; ++channel)
+        {
+            if (useHp) wet[channel] = wetHighpass.processSample (channel, wet[channel]);
+            if (useLp) wet[channel] = wetLowpass.processSample (channel, wet[channel]);
+        }
+
+        const auto width = widthSmoothed.getNextValue();
+        if (numOut > 1)
+        {
+            const auto mid  = (wet[0] + wet[1]) * 0.5f;
+            const auto side = (wet[0] - wet[1]) * 0.5f * width;
+            wet[0] = mid + side;
+            wet[1] = mid - side;
+        }
+
         const auto mix     = mixSmoothed.getNextValue();
         const auto dryGain = std::cos (mix * juce::MathConstants<float>::halfPi);
         const auto wetGain = std::sin (mix * juce::MathConstants<float>::halfPi) * duckGain;
@@ -457,7 +676,7 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         for (int channel = 0; channel < numOut; ++channel)
         {
             auto* data = buffer.getWritePointer (channel);
-            data[i] = (data[i] * dryGain + wetBuffer.getSample (channel, i) * wetGain) * outGain;
+            data[i] = (data[i] * dryGain + wet[juce::jmin (channel, 1)] * wetGain) * outGain;
         }
     }
 }
