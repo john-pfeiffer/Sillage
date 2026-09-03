@@ -1,14 +1,19 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <array>
 
 #include "GrainEngine.h"
+#include "Modulators.h"
+#include "OnsetDetector.h"
 #include "Parameters.h"
 
-class SillageAudioProcessor : public juce::AudioProcessor
+class SillageAudioProcessor : public juce::AudioProcessor,
+                              private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     SillageAudioProcessor();
+    ~SillageAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
@@ -39,6 +44,12 @@ public:
     // Live grain count, for the debug menu.
     int getActiveGrainCount() const noexcept { return engine.getActiveGrainCount(); }
 
+    // Monotonic transient counter for the hit indicator.
+    uint64_t getOnsetCount() const noexcept { return onsetDetector.getOnsetCount(); }
+
+    // True once Freeze has fully engaged.
+    bool isFrozen() const noexcept { return engine.isFrozen(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -47,14 +58,25 @@ private:
         return apvts.getRawParameterValue (id)->load();
     }
 
+    void parameterChanged (const juce::String& parameterId, float newValue) override;
+
     void updateTransport();
-    GrainEngine::Settings resolveGrainSettings() const;
-    FeedbackPath::Settings resolveFeedbackSettings() const;
+    GrainEngine::Settings resolveGrainSettings (const ChaosValues& chaos, float envelope) const;
+    FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos) const;
+    GrainEngine::TransientResponse resolveTransientResponse() const;
 
     std::atomic<double> effectiveBpm { 120.0 };
     std::atomic<double> barBeats { 4.0 };
+    std::atomic<bool>   panicRequested { false };
 
-    GrainEngine engine;
+    GrainEngine      engine;
+    OnsetDetector    onsetDetector;
+    EnvelopeFollower envelopeFollower;
+    ChaosModulator   chaosModulator;
+    DuckEnvelope     duck;
+
+    static constexpr int kMaxOnsetsPerBlock = 64;
+    std::array<int, kMaxOnsetsPerBlock> onsetOffsets {};
 
     juce::SmoothedValue<float> mixSmoothed, outputGainSmoothed;
     juce::AudioBuffer<float> wetBuffer;

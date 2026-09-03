@@ -1,23 +1,35 @@
 #include "PluginEditor.h"
+#include "Randomize.h"
 
 namespace
 {
 // One row per UI section; extend as build phases land.
 const std::vector<std::pair<const char*, std::vector<const char*>>> kSections = {
-    { "Grain",    { params::id::time, params::id::timeSync, params::id::timeDivision,
-                    params::id::density, params::id::spread, params::id::size,
-                    params::id::window } },
-    { "Pitch",    { params::id::pitch, params::id::pitchFine, params::id::pitchSpread,
-                    params::id::quantize, params::id::quantizeRoot,
-                    params::id::panSpread, params::id::reverse } },
-    { "Feedback", { params::id::feedback, params::id::fbHighpass, params::id::fbLowpass,
-                    params::id::fbResonance, params::id::shimmerInterval,
-                    params::id::shimmerAmount, params::id::shimmerFine,
-                    params::id::diffuse, params::id::satType, params::id::drive } },
-    { "Output",   { params::id::mix, params::id::output, params::id::fallbackBpm } },
+    { "Grain",      { params::id::time, params::id::timeSync, params::id::timeDivision,
+                      params::id::density, params::id::spread, params::id::size,
+                      params::id::window } },
+    { "Pitch",      { params::id::pitch, params::id::pitchFine, params::id::pitchSpread,
+                      params::id::quantize, params::id::quantizeRoot,
+                      params::id::panSpread, params::id::reverse } },
+    { "Feedback",   { params::id::feedback, params::id::fbHighpass, params::id::fbLowpass,
+                      params::id::fbResonance, params::id::shimmerInterval,
+                      params::id::shimmerAmount, params::id::shimmerFine,
+                      params::id::diffuse, params::id::satType, params::id::drive } },
+    { "Freeze & Chaos", { params::id::freeze, params::id::freezeFade, params::id::chaos,
+                          params::id::randomizeAmount } },
+    { "Transients", { params::id::sensitivity,
+                      params::id::retriggerOn, params::id::retriggerCount, params::id::retriggerRate,
+                      params::id::retriggerDivision, params::id::retriggerAmount, params::id::retriggerOffset,
+                      params::id::duckOn, params::id::duckDepth, params::id::duckAttack, params::id::duckRelease,
+                      params::id::chokeOn, params::id::chokeAmount, params::id::chokeFade,
+                      params::id::envDensity, params::id::envSpread } },
+    { "Sync",       { params::id::sync, params::id::grainDivision, params::id::swing } },
+    { "Output",     { params::id::mix, params::id::output, params::id::fallbackBpm } },
 };
 
-constexpr int kKnobW = 84, kKnobH = 96, kLabelH = 16, kHeaderH = 22, kPad = 8;
+constexpr int kKnobW = 76, kKnobH = 84, kLabelH = 16, kHeaderH = 22, kPad = 8;
+constexpr int kTopBarH = 32, kButtonW = 96, kIndicatorSize = 14;
+constexpr int kTimerHz = 30;
 } // namespace
 
 SillageAudioProcessorEditor::SillageAudioProcessorEditor (SillageAudioProcessor& p)
@@ -25,9 +37,22 @@ SillageAudioProcessorEditor::SillageAudioProcessorEditor (SillageAudioProcessor&
 {
     buildSections();
 
+    randomizeButton.onClick = [this] { randomize(); };
+    panicButton.onClick     = [this] { panic(); };
+    addAndMakeVisible (randomizeButton);
+    addAndMakeVisible (panicButton);
+
+    lastOnsetCount = processor.getOnsetCount();
+    startTimerHz (kTimerHz);
+
     setResizable (true, true);
-    setResizeLimits (520, 360, 2400, 1600);
-    setSize (900, 620);
+    setResizeLimits (640, 480, 2600, 1800);
+    setSize (1240, 960);
+}
+
+SillageAudioProcessorEditor::~SillageAudioProcessorEditor()
+{
+    stopTimer();
 }
 
 void SillageAudioProcessorEditor::buildSections()
@@ -85,6 +110,42 @@ void SillageAudioProcessorEditor::buildSections()
     }
 }
 
+void SillageAudioProcessorEditor::randomize()
+{
+    const auto amount = processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f;
+    randomize::apply (processor.apvts, amount, randomizeRng);
+}
+
+void SillageAudioProcessorEditor::panic()
+{
+    // Pulse the momentary parameter; the processor clears on the rising edge.
+    if (auto* param = processor.apvts.getParameter (params::id::panic))
+    {
+        param->setValueNotifyingHost (1.0f);
+        param->setValueNotifyingHost (0.0f);
+    }
+}
+
+void SillageAudioProcessorEditor::timerCallback()
+{
+    const auto count = processor.getOnsetCount();
+    if (count != lastOnsetCount)
+    {
+        lastOnsetCount = count;
+        hitGlow = 1.0f;
+    }
+    else if (hitGlow > 0.0f)
+    {
+        hitGlow = juce::jmax (0.0f, hitGlow - 4.0f / (float) kTimerHz); // ~250 ms decay
+    }
+    else
+    {
+        return;
+    }
+
+    repaint (hitIndicatorBounds.expanded (2));
+}
+
 void SillageAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
@@ -95,12 +156,28 @@ void SillageAudioProcessorEditor::paint (juce::Graphics& g)
     for (const auto& section : sections)
         g.drawText (section.name, kPad, section.headerY, getWidth() - kPad * 2, kHeaderH,
                     juce::Justification::centredLeft);
+
+    // Hit indicator: a plain square that lights on a transient and fades.
+    g.setColour (juce::Colours::white.withAlpha (0.25f));
+    g.drawRect (hitIndicatorBounds);
+    g.setColour (juce::Colours::white.withAlpha (0.15f + 0.85f * hitGlow));
+    g.fillRect (hitIndicatorBounds.reduced (2));
+
+    g.setColour (juce::Colours::white.withAlpha (0.7f));
+    g.setFont (juce::FontOptions (12.0f));
+    g.drawText ("Hit", hitIndicatorBounds.getRight() + 6, hitIndicatorBounds.getY(),
+                40, hitIndicatorBounds.getHeight(), juce::Justification::centredLeft);
 }
 
 void SillageAudioProcessorEditor::resized()
 {
+    randomizeButton.setBounds (kPad, kPad, kButtonW, kTopBarH - 8);
+    panicButton.setBounds (kPad * 2 + kButtonW, kPad, kButtonW, kTopBarH - 8);
+    hitIndicatorBounds = { kPad * 3 + kButtonW * 2 + 8, kPad + (kTopBarH - 8 - kIndicatorSize) / 2,
+                           kIndicatorSize, kIndicatorSize };
+
     const auto perRow = juce::jmax (1, (getWidth() - kPad * 2) / kKnobW);
-    int y = kPad;
+    int y = kPad + kTopBarH;
 
     for (auto& section : sections)
     {
