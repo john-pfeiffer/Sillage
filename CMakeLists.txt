@@ -35,6 +35,8 @@ juce_add_plugin(Sillage
     PRODUCT_NAME "Sillage")
 
 set(SILLAGE_SOURCES
+    src/FeedbackPath.cpp
+    src/GrainEngine.cpp
     src/Parameters.cpp
     src/PluginProcessor.cpp
     src/PluginEditor.cpp)
