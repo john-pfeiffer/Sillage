@@ -1,0 +1,69 @@
+name: dev-build
+
+on:
+  push:
+    branches: [develop, main, 'claude/**']
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    name: Build + test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install JUCE Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxext-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libfreetype-dev \
+            libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  build-macos:
+    name: Dev artifact (macOS universal)
+    runs-on: macos-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Collect artifacts
+        run: |
+          SHORTSHA=$(git rev-parse --short HEAD)
+          mkdir -p "dist/Sillage-dev-$SHORTSHA-macos"
+          cp -R build/Sillage_artefacts/Release/VST3/Sillage.vst3 "dist/Sillage-dev-$SHORTSHA-macos/"
+          cp -R build/Sillage_artefacts/Release/AU/Sillage.component "dist/Sillage-dev-$SHORTSHA-macos/"
+          cp -R "build/Sillage_artefacts/Release/Standalone/Sillage.app" "dist/Sillage-dev-$SHORTSHA-macos/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sillage-dev-macos
+          path: dist/
+
+  build-windows:
+    name: Dev artifact (Windows)
+    runs-on: windows-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          SHORTSHA=$(git rev-parse --short HEAD)
+          mkdir -p "dist/Sillage-dev-$SHORTSHA-windows"
+          cp -R build/Sillage_artefacts/Release/VST3/Sillage.vst3 "dist/Sillage-dev-$SHORTSHA-windows/"
+          cp build/Sillage_artefacts/Release/Standalone/Sillage.exe "dist/Sillage-dev-$SHORTSHA-windows/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sillage-dev-windows
+          path: dist/
