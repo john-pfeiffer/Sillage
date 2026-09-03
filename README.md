@@ -27,7 +27,8 @@ scripts/dev-build.sh --install  # ... and copy the VST3/AU into your user plugin
 
 Formats: VST3 + AU (AU on macOS only) + Standalone. macOS builds are universal
 (Intel + Apple Silicon). CI (`.github/workflows/dev-build.yml`) produces installable
-dev artifacts named `sillage-dev-{macos,windows}` for every push to `develop`.
+dev artifacts named `sillage-dev-{macos,windows}` for every push to `main` or a
+`jp/` branch, and for every pull request into `main`.
 
 Note: distribution builds assume a JUCE license appropriate for closed-source release
 (`JUCE_DISPLAY_SPLASH_SCREEN=0`).
@@ -44,8 +45,9 @@ Note: distribution builds assume a JUCE license appropriate for closed-source re
 
 ## Development
 
-- Branches: `main` (releases) + `develop` (integration); feature work lands on
-  short-lived branches merged into `develop`.
+- Branches: `main` only for now; feature work lands on short-lived `jp/`-prefixed
+  branches merged into `main` by pull request. A `develop` integration branch gets
+  added once the first release is out.
 - Work tracking: Notion database **"Sillage — Dev Tracker"** (Backlog → To do →
   In progress → Fixed in develop → Shipped in release). Dev builds are referenced
   as `dev-<shortsha>`.

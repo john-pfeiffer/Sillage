@@ -2,10 +2,11 @@
 
 - **Spec:** the product spec is the "Sillage — Handoff Document". Build order: grain
   engine → feedback path → freeze/chaos/randomize → transients → age → reverse/rewind →
-  wake → mod slots → UI polish. Ship incrementally on `develop`; each phase must be
+  wake → mod slots → UI polish. Ship incrementally by phase; each phase must be
   testable in a DAW before the next starts.
-- **Branches:** `main` (releases) + `develop` (integration). Never commit directly to
-  `main`.
+- **Branches:** `main` only for now. Feature work goes on `jp/`-prefixed branches and
+  reaches `main` by pull request — never commit directly to `main`. A `develop`
+  integration branch gets added once the first release is out.
 - **Work queue:** Notion database "Sillage — Dev Tracker" (via Notion MCP). Status flow:
   Backlog → To do → In progress → Fixed in develop → Shipped in release. Reference
   builds as `dev-<shortsha>` in the Build field.
