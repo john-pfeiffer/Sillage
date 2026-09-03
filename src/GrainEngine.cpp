@@ -111,6 +111,7 @@ void GrainEngine::prepare (double newSampleRate, int numChannels)
     capacity   = (int) std::ceil (kBufferSeconds * newSampleRate);
 
     ring.setSize (channels, capacity);
+    feedbackHistory.setSize (channels, kFeedbackHistorySize);
     stealFadeStep = (float) (1.0 / (kStealFadeSeconds * newSampleRate));
 
     feedbackSmoothed.reset (newSampleRate, 0.02);
@@ -122,6 +123,7 @@ void GrainEngine::prepare (double newSampleRate, int numChannels)
 void GrainEngine::reset()
 {
     ring.clear();
+    feedbackHistory.clear();
     writePos = 0;
 
     for (auto& grain : grains)
@@ -132,6 +134,11 @@ void GrainEngine::reset()
 
     activeGrains          = 0;
     samplesUntilNextGrain = 0.0;
+    slotParity            = false;
+    writeGain             = 1.0f;
+    burst                 = {};
+    chokeSamplesLeft      = 0;
+    chokePositionsLeft    = 0;
 
     feedbackSmoothed.setCurrentAndTargetValue (0.0f);
     feedbackPath.reset();
@@ -178,7 +185,19 @@ int GrainEngine::claimSlot()
     return -1;
 }
 
-void GrainEngine::spawnGrain (const Settings& settings)
+float GrainEngine::resolvePitchRate (const Settings& settings) noexcept
+{
+    // Pitch resolves once, at birth, and holds for the grain's life. Chaos
+    // lands before Quantize so a chaotic tail still snaps to the scale.
+    auto semitones = settings.pitchSemitones + settings.pitchModSemitones;
+    if (settings.pitchSpread > 0.0f)
+        semitones += settings.pitchSpread * 12.0f * (rng.nextFloat() * 2.0f - 1.0f);
+    semitones = scales::snapToScale (semitones, settings.quantize, settings.quantizeRoot);
+
+    return (float) std::pow (2.0, (double) semitones / 12.0);
+}
+
+void GrainEngine::activateGrain (double startPos, double rate, const Settings& settings, float gainScale)
 {
     if (activeGrains >= kMaxGrains)
     {
@@ -211,14 +230,56 @@ void GrainEngine::spawnGrain (const Settings& settings)
         return; // every slot is busy fading; dropping one trigger is inaudible
 
     auto& grain = grains[(size_t) slot];
+    const auto length = juce::jmax (1.0, settings.sizeSamples);
 
-    // Pitch resolves once, at birth, and holds for the grain's life.
-    auto semitones = settings.pitchSemitones;
-    if (settings.pitchSpread > 0.0f)
-        semitones += settings.pitchSpread * 12.0f * (rng.nextFloat() * 2.0f - 1.0f);
-    semitones = scales::snapToScale (semitones, settings.quantize, settings.quantizeRoot);
+    while (startPos < 0.0)                startPos += (double) capacity;
+    while (startPos >= (double) capacity) startPos -= (double) capacity;
 
-    const auto rate     = std::pow (2.0, (double) semitones / 12.0);
+    // Equal-power pan that stays exactly unity per channel at centre, so Pan
+    // Spread at 0 leaves the source's own stereo image untouched.
+    const auto pan   = settings.panSpread * (rng.nextFloat() * 2.0f - 1.0f);
+    const auto theta = ((double) pan + 1.0) * juce::MathConstants<double>::pi * 0.25;
+
+    // Overlapping grains sum, so compensate by the expected overlap or Density
+    // and Size would double as volume controls.
+    const auto overlap      = settings.density * (length / sampleRate);
+    const auto compensation = (float) (1.0 / std::sqrt (juce::jmax (1.0, overlap))) * gainScale;
+
+    grain.gainLeft  = juce::MathConstants<float>::sqrt2 * (float) std::cos (theta) * compensation;
+    grain.gainRight = juce::MathConstants<float>::sqrt2 * (float) std::sin (theta) * compensation;
+
+    grain.readPos   = startPos;
+    grain.rate      = rate;
+    grain.pos       = 0.0;
+    grain.length    = length;
+    grain.invLength = 1.0 / length;
+    grain.window    = settings.window;
+    grain.fade      = 1.0f;
+    grain.fadeStep  = 0.0f;
+    grain.stolen    = false;
+    grain.scale     = 1.0f;
+    grain.scaleTarget = 1.0f;
+    grain.scaleStep = 0.0f;
+    grain.scaleSamplesLeft = 0;
+
+    // A grain born while a choke is still fading may read audio the sweep has
+    // not reached yet, so it joins the same ramp instead of cutting off later.
+    if (chokeSamplesLeft > 0)
+    {
+        grain.scaleTarget      = chokeGain;
+        grain.scaleStep        = (chokeGain - 1.0f) / (float) chokeSamplesLeft;
+        grain.scaleSamplesLeft = chokeSamplesLeft;
+    }
+
+    grain.birth     = grainCounter++;
+    grain.active    = true;
+
+    ++activeGrains;
+}
+
+void GrainEngine::spawnScheduledGrain (const Settings& settings)
+{
+    const auto rate     = (double) resolvePitchRate (settings);
     const auto reversed = settings.reverseProbability > 0.0f
                        && rng.nextFloat() < settings.reverseProbability;
 
@@ -237,72 +298,178 @@ void GrainEngine::spawnGrain (const Settings& settings)
 
     // Spread interpolates from "exactly Time" to "anywhere in the buffer".
     // Interpolating rather than clamping a random deviation is what keeps the
-    // distribution smooth instead of piling grains up at the limits.
+    // distribution smooth instead of piling grains up at the limits. Chaos
+    // then pushes the result around on its own slow clock.
     const auto base         = juce::jlimit (minOffset, maxOffset, settings.timeSamples);
     const auto randomOffset = minOffset + rng.nextDouble() * (maxOffset - minOffset);
     const auto offset       = juce::jlimit (minOffset, maxOffset,
-                                            base + (double) settings.spread * (randomOffset - base));
+                                            base + (double) settings.spread * (randomOffset - base)
+                                                 + settings.timeModSamples);
 
-    auto startPos = (double) writePos - offset + (reversed ? span : 0.0);
-    while (startPos < 0.0)              startPos += (double) capacity;
-    while (startPos >= (double) capacity) startPos -= (double) capacity;
+    const auto startPos = (double) writePos - offset + (reversed ? span : 0.0);
+    activateGrain (startPos, reversed ? -rate : rate, settings, 1.0f);
+}
 
-    // Equal-power pan that stays exactly unity per channel at centre, so Pan
-    // Spread at 0 leaves the source's own stereo image untouched.
-    const auto pan   = settings.panSpread * (rng.nextFloat() * 2.0f - 1.0f);
-    const auto theta = ((double) pan + 1.0) * juce::MathConstants<double>::pi * 0.25;
+void GrainEngine::spawnBurstGrain (const Settings& settings)
+{
+    // Every grain in a burst reads the same hit, so the hit stutters rather
+    // than smears. Pitched-up grains still need their guard against the head.
+    const auto rate   = (double) resolvePitchRate (settings);
+    const auto length = juce::jmax (1.0, settings.sizeSamples);
 
-    // Overlapping grains sum, so compensate by the expected overlap or Density
-    // and Size would double as volume controls.
-    const auto overlap      = settings.density * (length / sampleRate);
-    const auto compensation = (float) (1.0 / std::sqrt (juce::jmax (1.0, overlap)));
+    auto offsetBehind = (double) writePos - burst.hitPos;
+    while (offsetBehind < 0.0) offsetBehind += (double) capacity;
 
-    grain.gainLeft  = juce::MathConstants<float>::sqrt2 * (float) std::cos (theta) * compensation;
-    grain.gainRight = juce::MathConstants<float>::sqrt2 * (float) std::sin (theta) * compensation;
+    const auto minOffset = kReadGuard + juce::jmax (0.0, length * (rate - 1.0));
+    const auto startPos  = offsetBehind < minOffset ? (double) writePos - minOffset : burst.hitPos;
 
-    grain.readPos   = startPos;
-    grain.rate      = reversed ? -rate : rate;
-    grain.pos       = 0.0;
-    grain.length    = length;
-    grain.invLength = 1.0 / length;
-    grain.window    = settings.window;
-    grain.fade      = 1.0f;
-    grain.fadeStep  = 0.0f;
-    grain.stolen    = false;
-    grain.birth     = grainCounter++;
-    grain.active    = true;
+    activateGrain (startPos, rate, settings, burst.amount);
+}
 
-    ++activeGrains;
+void GrainEngine::beginBurst (const TransientResponse& response)
+{
+    burst.remaining = juce::jlimit (1, 16, response.burstCount);
+    burst.interval  = juce::jmax (1.0, response.burstIntervalSamples);
+    burst.nextIn    = 0.0; // first grain fires on this sample
+    burst.amount    = response.burstAmount;
+
+    auto hitPos = (double) writePos - juce::jmax (kReadGuard, response.burstOffsetSamples);
+    while (hitPos < 0.0) hitPos += (double) capacity;
+    burst.hitPos = hitPos;
+}
+
+void GrainEngine::beginChoke (const TransientResponse& response)
+{
+    const auto fade   = juce::jmax (1, (int) response.chokeFadeSamples);
+    const auto factor = 1.0f - juce::jlimit (0.0f, 1.0f, response.chokeAmount);
+
+    // In-flight grains ramp down over the fade...
+    for (auto& grain : grains)
+    {
+        if (! grain.active)
+            continue;
+
+        grain.scaleTarget      = grain.scale * factor;
+        grain.scaleStep        = (grain.scaleTarget - grain.scale) / (float) fade;
+        grain.scaleSamplesLeft = fade;
+    }
+
+    // ...and the buffer they would keep reading from is swept by the same
+    // factor, a chunk per sample. The sweep runs backward from just behind
+    // the head, so what grains read next is cleared first, and it leaves the
+    // hit itself plus the input arriving during the fade untouched — that is
+    // the new material the choke is making room for.
+    const auto protect = juce::jlimit (0, kFeedbackHistorySize, (int) response.chokeProtectSamples);
+
+    // The protected samples hold the hit *and* the last few ms of old tail
+    // that feedback wrote alongside it. Take out exactly that part.
+    for (int k = 1; k <= protect; ++k)
+    {
+        auto pos = writePos - k;
+        if (pos < 0) pos += capacity;
+        const auto slot = (size_t) (pos & (kFeedbackHistorySize - 1));
+        for (int channel = 0; channel < channels; ++channel)
+            ring.getWritePointer (channel)[pos] -= feedbackHistory.getSample (channel, (int) slot) * (1.0f - factor);
+    }
+
+    chokePositionsLeft = juce::jmax (0, capacity - protect - fade);
+    chokeChunk         = (chokePositionsLeft + fade - 1) / fade;
+    chokeSweepPos      = writePos - protect - 1;
+    while (chokeSweepPos < 0) chokeSweepPos += capacity;
+    chokeGain          = factor;
+    chokeSamplesLeft   = fade;
+}
+
+void GrainEngine::advanceChoke() noexcept
+{
+    if (chokeSamplesLeft <= 0)
+        return;
+
+    for (int n = 0; n < chokeChunk && chokePositionsLeft > 0; ++n, --chokePositionsLeft)
+    {
+        for (int channel = 0; channel < channels; ++channel)
+            ring.getWritePointer (channel)[chokeSweepPos] *= chokeGain;
+
+        if (--chokeSweepPos < 0)
+            chokeSweepPos = capacity - 1;
+    }
+
+    --chokeSamplesLeft;
 }
 
 void GrainEngine::process (const float* const* input,
                            float* const* wet,
                            int numChannels,
                            int numSamples,
-                           const Settings& settings)
+                           const Settings& settings,
+                           const int* onsets,
+                           int numOnsets,
+                           const TransientResponse& response)
 {
     const auto active   = juce::jmin (numChannels, channels);
-    const auto interval = sampleRate / juce::jmax (0.5, settings.density);
     const auto& tables  = windowTables();
+
+    // With Sync on the grain slots are a musical division and Swing delays
+    // every other slot; free-running, Density sets the spacing and Spread
+    // jitters it so a dense setting does not comb.
+    const auto synced   = settings.sync && settings.syncIntervalSamples >= 1.0;
+    const auto interval = synced ? settings.syncIntervalSamples
+                                 : sampleRate / juce::jmax (0.5, settings.density);
+    const auto swingDelay = synced ? (double) settings.swing * interval / 3.0 : 0.0;
+
+    // Freeze crossfades the write over Freeze Fade; 0 ms is an instant stop.
+    const auto writeTarget = settings.freeze ? 0.0f : 1.0f;
+    const auto writeStep   = settings.freezeFadeSamples >= 1.0
+                           ? (float) (1.0 / settings.freezeFadeSamples) : 1.0f;
 
     feedbackSmoothed.setTargetValue (settings.feedback);
 
+    int onsetIndex = 0;
+
     for (int i = 0; i < numSamples; ++i)
     {
+        while (onsetIndex < numOnsets && onsets[onsetIndex] <= i)
+        {
+            if (response.retrigger)
+                beginBurst (response);
+            if (response.choke)
+                beginChoke (response);
+            ++onsetIndex;
+        }
+
         samplesUntilNextGrain -= 1.0;
 
         for (int spawned = 0; samplesUntilNextGrain <= 0.0 && spawned < kGrainSlots; ++spawned)
         {
-            spawnGrain (settings);
+            spawnScheduledGrain (settings);
 
-            // Spread jitters trigger timing as well as read position, which is
-            // what stops a dense setting from sounding like a comb filter.
-            const auto jitter = 1.0 + (double) settings.spread * (rng.nextDouble() * 2.0 - 1.0) * 0.75;
-            samplesUntilNextGrain += juce::jmax (1.0, interval * jitter);
+            double next = interval;
+            if (synced)
+            {
+                next += slotParity ? -swingDelay : swingDelay;
+                slotParity = ! slotParity;
+            }
+            else
+            {
+                next *= 1.0 + (double) settings.spread * (rng.nextDouble() * 2.0 - 1.0) * 0.75;
+            }
+
+            samplesUntilNextGrain += juce::jmax (1.0, next);
         }
 
         if (samplesUntilNextGrain <= 0.0)
             samplesUntilNextGrain = 1.0;
+
+        if (burst.remaining > 0)
+        {
+            burst.nextIn -= 1.0;
+            while (burst.nextIn <= 0.0 && burst.remaining > 0)
+            {
+                spawnBurstGrain (settings);
+                --burst.remaining;
+                burst.nextIn += burst.interval;
+            }
+        }
 
         float sum[2] { 0.0f, 0.0f };
 
@@ -311,8 +478,16 @@ void GrainEngine::process (const float* const* input,
             if (! grain.active)
                 continue;
 
+            if (grain.scaleSamplesLeft > 0)
+            {
+                grain.scale += grain.scaleStep;
+                if (--grain.scaleSamplesLeft == 0)
+                    grain.scale = grain.scaleTarget;
+            }
+
             const auto envelope = windowValue (tables[(size_t) grain.window],
-                                               grain.pos * grain.invLength) * grain.fade;
+                                               grain.pos * grain.invLength)
+                                * grain.fade * grain.scale;
 
             const auto left  = readInterpolated (0, grain.readPos);
             const auto right = active > 1 ? readInterpolated (1, grain.readPos) : left;
@@ -325,7 +500,8 @@ void GrainEngine::process (const float* const* input,
             while (grain.readPos < 0.0)                grain.readPos += (double) capacity;
             while (grain.readPos >= (double) capacity) grain.readPos -= (double) capacity;
 
-            auto finished = grain.pos >= grain.length;
+            auto finished = grain.pos >= grain.length
+                         || (grain.scaleSamplesLeft == 0 && grain.scaleTarget <= 0.0f);
 
             if (grain.stolen)
             {
@@ -342,19 +518,35 @@ void GrainEngine::process (const float* const* input,
             }
         }
 
-        // Feedback: grain sum -> colour stages -> limiter -> buffer.
-        const auto feedback = feedbackSmoothed.getNextValue();
+        advanceChoke();
+
+        // Feedback: grain sum -> colour stages -> limiter -> buffer. The path
+        // runs even while frozen so its state stays warm for the release.
+        const auto feedback  = feedbackSmoothed.getNextValue()
+                             * (chokeSamplesLeft > 0 ? chokeGain : 1.0f);
         float returned[2] { sum[0] * feedback, sum[1] * feedback };
         feedbackPath.processFrame (returned, active);
 
-        for (int channel = 0; channel < channels; ++channel)
-        {
-            const auto source = input[juce::jmin (channel, numChannels - 1)][i];
-            ring.getWritePointer (channel)[writePos] = source + returned[juce::jmin (channel, 1)];
-        }
+        if (writeGain < writeTarget)      writeGain = juce::jmin (writeTarget, writeGain + writeStep);
+        else if (writeGain > writeTarget) writeGain = juce::jmax (writeTarget, writeGain - writeStep);
 
-        if (++writePos >= capacity)
-            writePos = 0;
+        // Frozen means the head stops: Time then chooses where in the held
+        // buffer grains read, and everything else keeps playing it.
+        if (writeGain > 0.0f)
+        {
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                const auto source   = input[juce::jmin (channel, numChannels - 1)][i];
+                const auto incoming = source + returned[juce::jmin (channel, 1)];
+                auto* slot          = ring.getWritePointer (channel) + writePos;
+                *slot += (incoming - *slot) * writeGain;
+                feedbackHistory.setSample (channel, writePos & (kFeedbackHistorySize - 1),
+                                           returned[juce::jmin (channel, 1)] * writeGain);
+            }
+
+            if (++writePos >= capacity)
+                writePos = 0;
+        }
 
         for (int channel = 0; channel < numChannels; ++channel)
             wet[channel][i] = sum[juce::jmin (channel, 1)];

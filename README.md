@@ -65,14 +65,31 @@ Every parameter is exposed to host automation (EVS standard).
 | Output | Mix | 0–100 % | Dry/wet, equal-power |
 | Output | Output | ±24 dB | Output trim |
 | Output | Fallback BPM | 20–300 | Used for synced parameters when the host provides no tempo |
+| Freeze & Chaos | Freeze | on / off | Stops the write head; the held buffer stays a playable source for Time / Spread / Pitch / Density |
+| Freeze & Chaos | Freeze Fade | 0–2000 ms | Crossfades into and out of Freeze so it never clicks |
+| Freeze & Chaos | Chaos | 0–100 % | Smoothed-random drift of read position, pitch, feedback (up to +30 %), density (±50 %) and shimmer detune; the loop limiter is what keeps 100 % musical |
+| Freeze & Chaos | Randomize Amt | 0–100 % | 100 = full reroll, 20 = a nudge. Randomize never touches Mix, Output, Freeze or Panic |
+| Transients | Sensitivity | 0–100 % | Spectral-flux onset detector on the input; the Hit indicator shows detections |
+| Transients | Retrigger, Burst Count, Burst Rate, Burst Div, Burst Amt, Burst Offset | 1–16, 10–1000 ms / division, 0–100 %, 0–100 ms | A hit fires a burst of grains that all read the hit itself — a stutter, not a smear. Rate follows Sync |
+| Transients | Duck, Duck Depth, Duck Attack, Duck Release | 0–100 %, 1–50 ms, 20–2000 ms | A hit pushes the wet signal down and lets it bloom back |
+| Transients | Choke, Choke Amt, Choke Fade | 0–100 %, 1–200 ms | A hit kills the existing tail, both the grains in flight and the buffer they read from |
+| Transients | Env > Density, Env > Spread | ±100 % | The input envelope (relative to recent loudness) drives Density / Spread. Positive: hits dense, sustains sparse |
+| Sync | Sync | on / off | Grain spacing and burst rate follow the host tempo |
+| Sync | Grain Div | 1/64T – 1 bar | Grain spacing when Sync is on (takes over from Density) |
+| Sync | Swing | 0–100 % | Delays every other grain slot; 100 = a 2:1 triplet feel |
+| Output | Panic | momentary | Clears every buffer and grain instantly (automatable) |
 
 The signal chain inside the loop is fixed: `grain sum → HP → LP → Shimmer → Diffuse →
 Saturation → Limiter → buffer`. The limiter is what makes Feedback above 100 % safe, so
 no colour stage may be placed after it.
 
-Build phases 1 and 2 of the handoff's build order are in. Still to come: Freeze, Chaos,
-Randomize and Panic; the transient system; Age and Degrade; Reverse/Rewind; Wake modes;
-mod slots; and the Custom user scale for Quantize.
+Transient detection reacts a few milliseconds after a hit (about half an FFT window
+plus a hop). That is the responses' reaction time, not plugin latency: the dry path is
+never delayed, and reported latency stays 0.
+
+Build phases 1–4 of the handoff's build order are in. Still to come: Age and Degrade;
+Reverse/Rewind mode; Wake modes and Displace; mod slots and LFOs; Width and the post-loop
+Wet HP/LP; presets and installers; and the Custom user scale for Quantize.
 
 ## Development
 

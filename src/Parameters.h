@@ -13,6 +13,7 @@ namespace id
     inline constexpr auto mix         = "mix";
     inline constexpr auto output      = "output";
     inline constexpr auto fallbackBpm = "fallbackBpm";
+    inline constexpr auto panic       = "panic";
 
     // Grain engine (5.1)
     inline constexpr auto time         = "time";
@@ -43,6 +44,35 @@ namespace id
     inline constexpr auto diffuse         = "diffuse";
     inline constexpr auto satType         = "satType";
     inline constexpr auto drive           = "drive";
+
+    // Freeze (5.3), Chaos (5.4), Randomize (5.10)
+    inline constexpr auto freeze          = "freeze";
+    inline constexpr auto freezeFade      = "freezeFade";
+    inline constexpr auto chaos           = "chaos";
+    inline constexpr auto randomizeAmount = "randomizeAmount";
+
+    // Transient system (5.5)
+    inline constexpr auto sensitivity       = "sensitivity";
+    inline constexpr auto retriggerOn       = "retriggerOn";
+    inline constexpr auto retriggerCount    = "retriggerCount";
+    inline constexpr auto retriggerRate     = "retriggerRate";
+    inline constexpr auto retriggerDivision = "retriggerDivision";
+    inline constexpr auto retriggerAmount   = "retriggerAmount";
+    inline constexpr auto retriggerOffset   = "retriggerOffset";
+    inline constexpr auto duckOn            = "duckOn";
+    inline constexpr auto duckDepth         = "duckDepth";
+    inline constexpr auto duckAttack        = "duckAttack";
+    inline constexpr auto duckRelease       = "duckRelease";
+    inline constexpr auto chokeOn           = "chokeOn";
+    inline constexpr auto chokeAmount       = "chokeAmount";
+    inline constexpr auto chokeFade         = "chokeFade";
+    inline constexpr auto envDensity        = "envDensity";
+    inline constexpr auto envSpread         = "envSpread";
+
+    // Sync & Swing (5.5)
+    inline constexpr auto sync          = "sync";
+    inline constexpr auto grainDivision = "grainDivision";
+    inline constexpr auto swing         = "swing";
 }
 
 // Musical divisions for synced Time, measured in beats (a quarter note = 1 beat).
@@ -78,7 +108,17 @@ inline constexpr std::array<Division, 19> kDivisions { {
     { "1 bar", kBarDivision },
 } };
 
-inline constexpr int kDefaultDivision = 10; // 1/8
+inline constexpr int kDefaultDivision       = 10; // 1/8
+inline constexpr int kDefaultShortDivision  = 7;  // 1/16
+
+// Resolves a division to seconds. `barBeats` is the host's beats-per-bar.
+inline double divisionSeconds (int index, double bpm, double barBeats) noexcept
+{
+    const auto clamped  = (size_t) juce::jlimit (0, (int) kDivisions.size() - 1, index);
+    const auto division = kDivisions[clamped];
+    const auto beats    = division.beats < 0.0 ? barBeats : division.beats;
+    return beats * 60.0 / juce::jmax (1.0, bpm);
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 } // namespace params
