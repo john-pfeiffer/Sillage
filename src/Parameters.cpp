@@ -1,4 +1,5 @@
 #include "Parameters.h"
+#include "LifetimeCurves.h"
 #include "Scales.h"
 
 namespace params
@@ -37,6 +38,14 @@ juce::StringArray scaleNames()
     return names;
 }
 
+juce::StringArray longDivisionNames()
+{
+    juce::StringArray names;
+    for (const auto& division : kLongDivisions)
+        names.add (division.name);
+    return names;
+}
+
 juce::StringArray rootNames()
 {
     juce::StringArray names;
@@ -56,7 +65,7 @@ std::unique_ptr<Float> makeFloat (const char* id, const char* name, Args&&... ar
     return std::make_unique<Float> (juce::ParameterID { id, 1 }, name, std::forward<Args> (args)...);
 }
 
-std::unique_ptr<Bool> makeBool (const char* id, const char* name, bool defaultValue)
+std::unique_ptr<Bool> makeBool (const char* id, const juce::String& name, bool defaultValue)
 {
     return std::make_unique<Bool> (juce::ParameterID { id, 1 }, name, defaultValue);
 }
@@ -147,6 +156,40 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (makeBool (id::sync, "Sync", false));
     layout.add (makeChoice (id::grainDivision, "Grain Div", divisionNames(), kDefaultShortDivision));
     layout.add (makeFloat (id::swing, "Swing", percent(), 0.0f, label ("%")));
+
+    // ---- Age & per-pass Degrade (5.6) ---------------------------------------
+    layout.add (makeFloat (id::lifetime, "Lifetime", skewed (100.0f, 30000.0f, 2000.0f), 2000.0f, label ("ms")));
+    layout.add (makeFloat (id::degradeBits, "Bits/pass",
+                           juce::NormalisableRange<float> (0.0f, 2.0f), 0.0f, label ("bit")));
+    layout.add (makeFloat (id::degradeRate, "SR/pass",
+                           juce::NormalisableRange<float> (0.0f, 10.0f), 0.0f, label ("%")));
+    layout.add (makeFloat (id::degradeNoise, "Noise/pass", percent(), 0.0f, label ("%")));
+    layout.add (makeFloat (id::degradeTilt, "LP tilt/pass",
+                           juce::NormalisableRange<float> (0.0f, 500.0f), 0.0f, label ("Hz")));
+    layout.add (makeFloat (id::degradeDrift, "Drift/pass",
+                           juce::NormalisableRange<float> (0.0f, 50.0f), 0.0f, label ("ct")));
+    layout.add (makeChoice (id::degradeDriftDir, "Drift Dir",
+                            juce::StringArray { "Up", "Down", "Random" }, 0));
+
+    for (size_t d = 0; d < id::curveEnable.size(); ++d)
+        layout.add (makeBool (id::curveEnable[d],
+                              juce::String ("Curve: ") + lifetime::kDestinationNames[d], false));
+
+    // ---- Rewind (5.7) -------------------------------------------------------
+    layout.add (makeBool (id::rewindOn, "Rewind", false));
+    layout.add (makeFloat (id::rewindLength, "Rewind Length", skewed (100.0f, 8000.0f, 1000.0f), 1000.0f, label ("ms")));
+    layout.add (makeChoice (id::rewindTrigger, "Rewind Trig",
+                            juce::StringArray { "Timer", "Transient", "Threshold", "Manual" }, 3));
+    layout.add (makeFloat (id::rewindInterval, "Rewind Every", skewed (0.1f, 30.0f, 2.0f), 2.0f, label ("s")));
+    layout.add (makeChoice (id::rewindDivision, "Rewind Div", longDivisionNames(), 2));
+    layout.add (makeFloat (id::rewindThreshold, "Rewind Thresh",
+                           juce::NormalisableRange<float> (-60.0f, 0.0f), -40.0f, label ("dB")));
+    layout.add (makeFloat (id::rewindLevel, "Rewind Level", percent(), 100.0f, label ("%")));
+    layout.add (makeFloat (id::rewindPitch, "Rewind Pitch",
+                           juce::NormalisableRange<float> (-12.0f, 12.0f, 1.0f), 0.0f, label ("st")));
+
+    // Momentary: fires a rewind on the rising edge.
+    layout.add (makeBool (id::rewindManual, "Rewind Now", false));
 
     // ---- Output & global (5.11) ---------------------------------------------
     layout.add (makeFloat (id::mix, "Mix", percent(), 30.0f, label ("%")));

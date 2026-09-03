@@ -4,6 +4,7 @@
 #include <array>
 
 #include "GrainEngine.h"
+#include "LifetimeCurves.h"
 #include "Modulators.h"
 #include "OnsetDetector.h"
 #include "Parameters.h"
@@ -50,6 +51,19 @@ public:
     // True once Freeze has fully engaged.
     bool isFrozen() const noexcept { return engine.isFrozen(); }
 
+    // Age (5.6) of what the live grains are playing, in seconds and against
+    // Lifetime.
+    float getAverageAgeSeconds() const noexcept { return engine.getAverageAgeSeconds(); }
+    float getAverageAgeNormalised() const noexcept;
+
+    bool isRewinding() const noexcept { return engine.isRewinding(); }
+
+    // Lifetime Curves live in the state tree (they save with the session) and
+    // are published to the audio thread as a snapshot. Message thread only.
+    lifetime::CurveSet getCurves() const;
+    void setCurves (const lifetime::CurveSet& curves);
+    void publishCurves();
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -60,20 +74,32 @@ private:
 
     void parameterChanged (const juce::String& parameterId, float newValue) override;
 
+    void ensureCurvesInState();
     void updateTransport();
+    double resolveTimeSeconds() const;
     GrainEngine::Settings resolveGrainSettings (const ChaosValues& chaos, float envelope) const;
     FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos) const;
     GrainEngine::TransientResponse resolveTransientResponse() const;
+    void updateRewindTriggers (int numSamples);
 
     std::atomic<double> effectiveBpm { 120.0 };
     std::atomic<double> barBeats { 4.0 };
     std::atomic<bool>   panicRequested { false };
+    std::atomic<bool>   rewindManualRequested { false };
 
     GrainEngine      engine;
     OnsetDetector    onsetDetector;
     EnvelopeFollower envelopeFollower;
     ChaosModulator   chaosModulator;
     DuckEnvelope     duck;
+
+    lifetime::CurveStore curveStore;
+    lifetime::CurveSet   activeCurves; // per-block copy handed to the engine
+
+    // Rewind trigger state (5.7).
+    double rewindTimerLeft       = 0.0;   // samples until the next timed rewind
+    bool   rewindThresholdArmed  = false; // re-arms once the tail rises again
+    float  wetLevelDb            = -120.0f;
 
     static constexpr int kMaxOnsetsPerBlock = 64;
     std::array<int, kMaxOnsetsPerBlock> onsetOffsets {};

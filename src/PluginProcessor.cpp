@@ -12,6 +12,10 @@ constexpr float kChaosFeedbackBoost   = 0.30f; // up to +30 % above the set valu
 constexpr float kChaosDensityRange    = 0.50f; // ±50 %
 constexpr float kChaosPitchSemitones  = 12.0f;
 constexpr float kChaosShimmerCents    = 50.0f;
+
+// Rewind threshold hysteresis: the tail has to come back up this far above the
+// threshold before a falling crossing can fire again.
+constexpr float kRewindRearmDb = 6.0f;
 } // namespace
 
 SillageAudioProcessor::SillageAudioProcessor()
@@ -21,20 +25,65 @@ SillageAudioProcessor::SillageAudioProcessor()
       apvts (*this, nullptr, "PARAMS", params::createLayout())
 {
     apvts.addParameterListener (params::id::panic, this);
+    apvts.addParameterListener (params::id::rewindManual, this);
+
+    ensureCurvesInState();
+    publishCurves();
 }
 
 SillageAudioProcessor::~SillageAudioProcessor()
 {
     apvts.removeParameterListener (params::id::panic, this);
+    apvts.removeParameterListener (params::id::rewindManual, this);
 }
 
 void SillageAudioProcessor::parameterChanged (const juce::String& parameterId, float newValue)
 {
-    // Panic is momentary: a rising edge from the UI pulse or host automation
-    // arms a clear that the audio thread performs at the top of its next block.
-    if (parameterId == params::id::panic && newValue >= 0.5f)
+    // Momentary parameters: a rising edge from the UI pulse or host automation
+    // arms an action that the audio thread performs at the top of its next block.
+    if (newValue < 0.5f)
+        return;
+
+    if (parameterId == params::id::panic)
         panicRequested.store (true);
+    else if (parameterId == params::id::rewindManual)
+        rewindManualRequested.store (true);
 }
+
+// ---- Lifetime Curves state ---------------------------------------------------
+
+void SillageAudioProcessor::ensureCurvesInState()
+{
+    if (! apvts.state.getChildWithName (lifetime::kCurvesType).isValid())
+        apvts.state.appendChild (lifetime::toValueTree (lifetime::defaultCurveSet()), nullptr);
+}
+
+lifetime::CurveSet SillageAudioProcessor::getCurves() const
+{
+    return lifetime::fromValueTree (apvts.state.getChildWithName (lifetime::kCurvesType));
+}
+
+void SillageAudioProcessor::setCurves (const lifetime::CurveSet& curves)
+{
+    auto existing = apvts.state.getChildWithName (lifetime::kCurvesType);
+    if (existing.isValid())
+        apvts.state.removeChild (existing, nullptr);
+    apvts.state.appendChild (lifetime::toValueTree (curves), nullptr);
+    publishCurves();
+}
+
+void SillageAudioProcessor::publishCurves()
+{
+    curveStore.set (getCurves());
+}
+
+float SillageAudioProcessor::getAverageAgeNormalised() const noexcept
+{
+    const auto lifetimeSeconds = juce::jmax (0.001f, parameterValue (params::id::lifetime) * 0.001f);
+    return juce::jlimit (0.0f, 1.0f, engine.getAverageAgeSeconds() / lifetimeSeconds);
+}
+
+// ---- Lifecycle ---------------------------------------------------------------
 
 void SillageAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -51,6 +100,10 @@ void SillageAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     envelopeFollower.prepare (sampleRate);
     chaosModulator.prepare (sampleRate);
     duck.prepare (sampleRate);
+
+    rewindTimerLeft      = 0.0;
+    rewindThresholdArmed = false;
+    wetLevelDb           = -120.0f;
 
     // Zero latency: the granular loop shifter reads from a delay line rather
     // than looking ahead, and the onset detector's reaction time delays the
@@ -102,6 +155,19 @@ void SillageAudioProcessor::updateTransport()
     barBeats.store (beatsPerBar);
 }
 
+double SillageAudioProcessor::resolveTimeSeconds() const
+{
+    double timeSeconds = (double) parameterValue (params::id::time) * 0.001;
+    if (parameterValue (params::id::timeSync) >= 0.5f)
+        timeSeconds = params::divisionSeconds ((int) parameterValue (params::id::timeDivision),
+                                               effectiveBpm.load(), barBeats.load());
+
+    // Never ask for more delay than the buffer holds.
+    return juce::jlimit (0.001, kBufferSeconds * 0.98, timeSeconds);
+}
+
+// ---- Settings ----------------------------------------------------------------
+
 GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosValues& chaos,
                                                                    float envelope) const
 {
@@ -112,14 +178,7 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     const auto chaosAmt  = parameterValue (params::id::chaos) * 0.01f;
     const auto bipolar   = envelope * 2.0f - 1.0f; // -1 quiet .. +1 loud
 
-    double timeSeconds = (double) parameterValue (params::id::time) * 0.001;
-    if (parameterValue (params::id::timeSync) >= 0.5f)
-        timeSeconds = params::divisionSeconds ((int) parameterValue (params::id::timeDivision), bpm, bar);
-
-    // Never ask for more delay than the buffer holds.
-    timeSeconds = juce::jlimit (0.001, kBufferSeconds * 0.98, timeSeconds);
-
-    settings.timeSamples    = timeSeconds * currentSampleRate;
+    settings.timeSamples    = resolveTimeSeconds() * currentSampleRate;
     settings.timeModSamples = (double) (chaosAmt * chaos.position) * settings.timeSamples;
 
     // Density: Chaos wanders it ±50 %, the input envelope scales it up to an
@@ -161,6 +220,18 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
         (int) parameterValue (params::id::grainDivision), bpm, bar) * currentSampleRate;
     settings.swing = parameterValue (params::id::swing) * 0.01f;
 
+    // Age & Lifetime Curves (5.6).
+    settings.lifetimeSeconds = juce::jmax (0.001, (double) parameterValue (params::id::lifetime) * 0.001);
+    settings.curves          = &activeCurves;
+    for (size_t d = 0; d < params::id::curveEnable.size(); ++d)
+        settings.curveEnabled[d] = parameterValue (params::id::curveEnable[d]) >= 0.5f;
+
+    // Rewind (5.7).
+    settings.rewindOn            = parameterValue (params::id::rewindOn) >= 0.5f;
+    settings.rewindLengthSamples = (double) parameterValue (params::id::rewindLength) * 0.001 * currentSampleRate;
+    settings.rewindLevel         = parameterValue (params::id::rewindLevel) * 0.01f;
+    settings.rewindRate          = std::pow (2.0, (double) parameterValue (params::id::rewindPitch) / 12.0);
+
     return settings;
 }
 
@@ -194,6 +265,29 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     settings.satType          = juce::jlimit (0, 2, (int) parameterValue (params::id::satType));
     settings.drive            = parameterValue (params::id::drive) * 0.01f;
 
+    // Global Lifetime Curve destinations resolve from the average age of the
+    // live grains (5.9): the loop filters are replaced while their curve is
+    // enabled, and Bit depth / Sample rate set the base that per-pass Degrade
+    // then lowers further.
+    using lifetime::Destination;
+    const auto ageNorm = getAverageAgeNormalised();
+    const auto curveOn = [this] (Destination d) { return parameterValue (params::id::curveEnable[(size_t) d]) >= 0.5f; };
+    const auto curveAt = [&] (Destination d) { return activeCurves.curves[(size_t) d].evaluate (ageNorm); };
+
+    if (curveOn (Destination::lowpass))    settings.lowpassHz  = lifetime::lowpassHz (curveAt (Destination::lowpass));
+    if (curveOn (Destination::highpass))   settings.highpassHz = lifetime::highpassHz (curveAt (Destination::highpass));
+    if (curveOn (Destination::bitDepth))   settings.baseBits   = lifetime::bitDepth (curveAt (Destination::bitDepth));
+    if (curveOn (Destination::sampleRate)) settings.baseSampleRateHz = lifetime::sampleRateHz (curveAt (Destination::sampleRate), currentSampleRate);
+
+    // Per-pass Degrade (5.6 A).
+    settings.degradeBitsPerPass   = parameterValue (params::id::degradeBits);
+    settings.degradeRatePerPass   = parameterValue (params::id::degradeRate) * 0.01f;
+    settings.degradeNoise         = parameterValue (params::id::degradeNoise) * 0.01f;
+    settings.degradeTiltHzPerPass = parameterValue (params::id::degradeTilt);
+    settings.degradeDriftCents    = parameterValue (params::id::degradeDrift);
+    settings.driftDirection       = juce::jlimit (0, 2, (int) parameterValue (params::id::degradeDriftDir));
+    settings.passSeconds          = resolveTimeSeconds();
+
     return settings;
 }
 
@@ -221,8 +315,60 @@ GrainEngine::TransientResponse SillageAudioProcessor::resolveTransientResponse()
     response.chokeFadeSamples = (double) parameterValue (params::id::chokeFade) * 0.001 * currentSampleRate;
     response.chokeProtectSamples = (double) OnsetDetector::kDetectionLagSamples;
 
+    response.rewind = parameterValue (params::id::rewindOn) >= 0.5f
+                   && (params::RewindTrigger) (int) parameterValue (params::id::rewindTrigger)
+                          == params::RewindTrigger::transient;
+
     return response;
 }
+
+void SillageAudioProcessor::updateRewindTriggers (int numSamples)
+{
+    const auto rewindOn = parameterValue (params::id::rewindOn) >= 0.5f;
+    const auto mode     = (params::RewindTrigger) juce::jlimit (0, 3, (int) parameterValue (params::id::rewindTrigger));
+
+    // The manual button fires in every mode; it is a button.
+    auto fire = rewindManualRequested.exchange (false);
+
+    if (mode == params::RewindTrigger::timer)
+    {
+        const auto synced = parameterValue (params::id::sync) >= 0.5f;
+        const auto intervalSamples = juce::jmax (1.0,
+            (synced ? params::longDivisionSeconds ((int) parameterValue (params::id::rewindDivision),
+                                                   effectiveBpm.load(), barBeats.load())
+                    : (double) parameterValue (params::id::rewindInterval)) * currentSampleRate);
+
+        rewindTimerLeft -= (double) numSamples;
+        if (rewindTimerLeft <= 0.0)
+        {
+            fire = true;
+            rewindTimerLeft = intervalSamples;
+        }
+    }
+    else
+    {
+        rewindTimerLeft = 0.0; // start at once when the mode is switched to Timer
+    }
+
+    if (mode == params::RewindTrigger::threshold)
+    {
+        // Falling crossing with hysteresis: the tail has to climb back above
+        // threshold + 6 dB before another rewind can fire.
+        const auto threshold = parameterValue (params::id::rewindThreshold);
+        if (wetLevelDb > threshold + kRewindRearmDb)
+            rewindThresholdArmed = true;
+        else if (rewindThresholdArmed && wetLevelDb < threshold)
+        {
+            rewindThresholdArmed = false;
+            fire = true;
+        }
+    }
+
+    if (fire && rewindOn)
+        engine.triggerRewind();
+}
+
+// ---- Processing --------------------------------------------------------------
 
 void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
@@ -241,9 +387,13 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         duck.reset();
         onsetDetector.reset();
         envelopeFollower.reset();
+        wetLevelDb           = -120.0f;
+        rewindThresholdArmed = false;
     }
 
     updateTransport();
+    curveStore.copyTo (activeCurves);
+    updateRewindTriggers (numSamples);
 
     // Transient detection and the input envelope run on the dry input, before
     // anything the engine does to it.
@@ -262,6 +412,20 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                     resolveGrainSettings (chaos, envelope),
                     onsetOffsets.data(), numOnsets,
                     resolveTransientResponse());
+
+    // Wet level for the Rewind threshold trigger, smoothed over ~50 ms.
+    {
+        double sum = 0.0;
+        for (int channel = 0; channel < numOut; ++channel)
+        {
+            const auto* data = wetBuffer.getReadPointer (channel);
+            for (int i = 0; i < numSamples; ++i)
+                sum += (double) data[i] * (double) data[i];
+        }
+        const auto rmsDb   = juce::Decibels::gainToDecibels ((float) std::sqrt (sum / juce::jmax (1, numSamples * numOut)), -120.0f);
+        const auto blockCoeff = (float) (1.0 - std::exp (-(double) numSamples / (0.05 * currentSampleRate)));
+        wetLevelDb += (rmsDb - wetLevelDb) * blockCoeff;
+    }
 
     mixSmoothed.setTargetValue (parameterValue (params::id::mix) * 0.01f);
     outputGainSmoothed.setTargetValue (
@@ -312,8 +476,14 @@ void SillageAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 void SillageAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
+    {
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            ensureCurvesInState();
+            publishCurves();
+        }
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
