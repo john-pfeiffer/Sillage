@@ -55,9 +55,29 @@ juce::StringArray rootNames()
     return names;
 }
 
+// Value text a person can read: whole numbers above 100, one decimal above
+// 10, two below, no trailing zeros, the unit after. This is what the text
+// boxes and the host's automation lanes show.
+juce::String formatValue (float value)
+{
+    const auto magnitude = std::abs (value);
+    const auto decimals  = magnitude >= 100.0f ? 0 : magnitude >= 10.0f ? 1 : 2;
+    auto text = juce::String (value, decimals);
+    if (text.containsChar ('.'))
+        text = text.trimCharactersAtEnd ("0").trimCharactersAtEnd (".");
+    return text;
+}
+
 auto label (const char* text)
 {
-    return juce::AudioParameterFloatAttributes().withLabel (text);
+    const juce::String unit (text);
+    return juce::AudioParameterFloatAttributes()
+        .withLabel (unit)
+        .withStringFromValueFunction ([unit] (float value, int)
+        {
+            return unit.isEmpty() ? formatValue (value) : formatValue (value) + " " + unit;
+        })
+        .withValueFromStringFunction ([] (const juce::String& text) { return text.trim().getFloatValue(); });
 }
 
 template <typename... Args>

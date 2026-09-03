@@ -25,8 +25,12 @@
   (`kMaxGrains = 64`) is compile-time; per-grain work must stay cheap (8+ instances
   per session is the CPU budget).
 - **Parameter IDs** live only in `src/Parameters.h` (`params::id::…`); the editor
-  builds its sections from ID tables in `src/PluginEditor.cpp`; keep the README
+  builds its tabs from ID tables in `src/PluginEditor.cpp` (`SectionPage`); keep the README
   parameter table current when the set changes.
+- **UI is two-tier:** the Main page (`src/MainPage.cpp`, eight knobs) is what a user sees;
+  everything else goes on a tab, never on the main page. A parameter is controlled from one
+  place only. Quick-start Types (`src/Types.cpp`) are tuned full starting points, applied as
+  an action — they move everything except the Randomize exclusions.
 - **Wake / modulation:** `WakeEngine` (`src/Wake.h`) owns the shared `GrainEngine` and the
   isolated instances; mod destinations resolve through `SillageAudioProcessor::modulated()`
   (normalised offsets, `src/Modulation.h`) — read a modulatable parameter through that, not

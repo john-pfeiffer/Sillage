@@ -76,6 +76,7 @@ public:
     bool loadPreset (const juce::File& file);
     void resetToDefaults();
     juce::String getPresetName() const;
+    void setPresetName (const juce::String& name);
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -91,7 +92,6 @@ private:
     void parameterChanged (const juce::String& parameterId, float newValue) override;
 
     void ensureCurvesInState();
-    void setPresetName (const juce::String& name);
     void updateTransport();
     void updateModulation (int numSamples, float envelope, int numOnsets);
     double resolveTimeSeconds() const;

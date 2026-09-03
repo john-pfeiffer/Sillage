@@ -33,6 +33,24 @@ dev artifacts named `sillage-dev-{macos,windows}` for every push to `main` or a
 Note: distribution builds assume a JUCE license appropriate for closed-source release
 (`JUCE_DISPLAY_SPLASH_SCREEN=0`).
 
+## Using it
+
+The plugin opens on the **Main** page: eight knobs that read like a reverb or delay.
+**Time** (with Sync and a division under it), **Spread** (the delay-to-reverb slider: 0
+reads exactly at Time, 100 scatters grains across the whole buffer), **Feedback**, **Size**,
+**Damping** (the loop low-pass), **Shimmer**, **Width** and **Mix**. The top bar has the
+presets, a **Type** selector, **Freeze**, the **Wake** mode and the Randomize / Panic /
+Rewind buttons.
+
+**Type** is a quick start, like a reverb's algorithm selector: Delay, Reverb, Shimmer, Wash
+or Granular sets every parameter to a tuned starting point for that character (leaving Mix,
+Output, Freeze and Wake mode alone) and names the preset after itself. The main knobs are
+then yours to move.
+
+Everything else lives on the tabs — **Grain**, **Feedback**, **Transients**, **Age**,
+**Rewind & Chaos**, **Mod**, **Output** — and none of it needs touching to use the plugin.
+Every parameter on every tab is still host-automatable.
+
 ## Parameters
 
 Every parameter is exposed to host automation (EVS standard).
@@ -157,3 +175,6 @@ Release.
   as `dev-<shortsha>`.
 - Tests: `ctest --test-dir build` runs a headless render harness
   (`tests/SillageTests.cpp`) that pushes audio through the real processor.
+- UI check without a DAW: configure with `-DSILLAGE_BUILD_SNAPSHOT_TOOL=ON` and run
+  `SillageSnapshot <dir>` (under `xvfb-run` on a headless machine) to render every tab of
+  the editor to PNG.

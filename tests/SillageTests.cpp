@@ -14,6 +14,7 @@
 #include "PluginProcessor.h"
 #include "Randomize.h"
 #include "Scales.h"
+#include "Types.h"
 
 namespace
 {
@@ -1700,6 +1701,50 @@ void testPresetFileRoundTrip()
     file.deleteFile();
 }
 
+// ---- Two-tier UI: quick-start Types --------------------------------------------
+
+// A Type is a tuned full starting point: it must leave the user's Mix, Output,
+// Freeze and Wake mode alone, name the preset, and hand over something that
+// makes a tail on its own.
+void testTypesGiveUsableStartingPoints()
+{
+    for (int t = 0; t < types::kNumTypes; ++t)
+    {
+        const auto type = (types::Type) t;
+        const auto name = juce::String (types::kTypeNames[(size_t) t]);
+
+        auto p = makeProcessor();
+        setParam (*p, params::id::mix, 64.0f);
+        setParam (*p, params::id::output, -3.0f);
+        setParam (*p, params::id::wakeMode, 1.0f);
+        setParam (*p, params::id::chokeOn, 1.0f); // something a Type must reset
+        types::apply (*p, type);
+
+        const bool untouched = std::abs (getParam (*p, params::id::mix) - 64.0f) < 0.01f
+                            && std::abs (getParam (*p, params::id::output) + 3.0f) < 0.01f
+                            && getParam (*p, params::id::wakeMode) >= 0.5f
+                            && getParam (*p, params::id::freeze) < 0.5f;
+        check (untouched, (name + ": leaves Mix, Output, Freeze and Wake alone").toRawUTF8());
+        check (getParam (*p, params::id::chokeOn) < 0.5f, (name + ": resets what it does not set").toRawUTF8());
+        check (p->getPresetName() == name, (name + ": names the preset after itself").toRawUTF8());
+
+        setParam (*p, params::id::mix, 100.0f);
+        setParam (*p, params::id::wakeMode, 0.0f);
+        Audio out;
+        render (*p, 3.0, toneThenSilence (220.0, 1.0), out);
+        check (allFinite (out) && peakSeconds (out, 0.0, 3.0) < 8.0f, (name + ": renders finite, bounded audio").toRawUTF8());
+        check (peakSeconds (out, 1.2, 3.0) > 1.0e-3f, (name + ": a tone leaves a tail behind").toRawUTF8());
+    }
+
+    auto delay = makeProcessor();
+    types::apply (*delay, types::Type::delay);
+    check (getParam (*delay, params::id::spread) < 0.5f, "the Delay type sits at Spread 0");
+
+    auto reverb = makeProcessor();
+    types::apply (*reverb, types::Type::reverb);
+    check (getParam (*reverb, params::id::spread) > 99.5f, "the Reverb type sits at Spread 100");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -1761,6 +1806,8 @@ int main()
     testWidthCollapsesAndWidens();
     testWetFiltersCleanTheOutput();
     testPresetFileRoundTrip();
+
+    testTypesGiveUsableStartingPoints();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);
