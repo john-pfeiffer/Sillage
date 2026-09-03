@@ -8,6 +8,7 @@
 #include <map>
 #include <vector>
 
+#include "LifetimeCurves.h"
 #include "OnsetDetector.h"
 #include "PluginProcessor.h"
 #include "Randomize.h"
@@ -80,7 +81,31 @@ void configureAsPlainDelay (SillageAudioProcessor& p)
     setParam (p, params::id::chokeOn, 0.0f);
     setParam (p, params::id::envDensity, 0.0f);
     setParam (p, params::id::envSpread, 0.0f);
+    setParam (p, params::id::lifetime, 2000.0f);
+    setParam (p, params::id::degradeBits, 0.0f);
+    setParam (p, params::id::degradeRate, 0.0f);
+    setParam (p, params::id::degradeNoise, 0.0f);
+    setParam (p, params::id::degradeTilt, 0.0f);
+    setParam (p, params::id::degradeDrift, 0.0f);
+    setParam (p, params::id::rewindOn, 0.0f);
+    for (auto* id : params::id::curveEnable)
+        setParam (p, id, 0.0f);
 }
+
+// Installs a two-point straight line for one Lifetime Curve destination and
+// optionally enables it.
+void setLine (SillageAudioProcessor& p, lifetime::Destination destination,
+              float startY, float endY, bool enable)
+{
+    auto curves = p.getCurves();
+    auto& curve = curves.curves[(size_t) destination];
+    curve.numPoints = 2;
+    curve.points[0] = { 0.0f, startY, 0.0f };
+    curve.points[1] = { 1.0f, endY, 0.0f };
+    p.setCurves (curves);
+    setParam (p, params::id::curveEnable[(size_t) destination], enable ? 1.0f : 0.0f);
+}
+
 
 // Renders `seconds` of the given input generator through the processor,
 // appending output to `out` (one vector per channel). `afterBlock` runs after
@@ -229,6 +254,17 @@ Generator clickAt (double seconds, float amplitude = 1.0f)
 {
     const auto at = (int64_t) (seconds * kSampleRate);
     return [=] (int64_t i, int) { return i == at ? amplitude : 0.0f; };
+}
+
+Generator decayingBurst (double hz, double untilSeconds, double decaySeconds, float amplitude = 0.5f)
+{
+    const auto until = (int64_t) (untilSeconds * kSampleRate);
+    return [=] (int64_t i, int)
+    {
+        if (i >= until) return 0.0f;
+        const auto t = (double) i / kSampleRate;
+        return sine (i, hz) * amplitude * (float) std::exp (-t / decaySeconds);
+    };
 }
 
 // ---- Phase 1 + 2 ----------------------------------------------------------------
@@ -889,6 +925,361 @@ void testSyncAndSwingPlaceGrainsOnTheGrid()
            "swing=100: slots alternate 2:1 (333 / 167 ms)");
 }
 
+
+// ---- Phase 5: Age, per-pass Degrade, Lifetime Curves ---------------------------
+
+// Age is tracked per buffer sample in seconds, so a grain reading far back is
+// genuinely older, and a tail that has been round the loop is older still.
+void testAgeTracksHowOldTheAudioIs()
+{
+    const auto averageAgeAt = [] (float spread, float feedback, double toneUntil, double readAt)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 100.0f);
+        setParam (*p, params::id::spread, spread);
+        setParam (*p, params::id::feedback, feedback);
+
+        // Average over a full second of blocks: at Spread 100 a single block's
+        // few sounding grains can all happen to be young.
+        double ageSum = 0.0;
+        int blocks = 0;
+        Audio out;
+        render (*p, readAt + 0.05, toneThenSilence (220.0, toneUntil), out, [&] (int64_t blockStart)
+        {
+            if (blockStart >= (int64_t) atSecond (readAt - 1.0) && blockStart < (int64_t) atSecond (readAt))
+            {
+                ageSum += p->getAverageAgeSeconds();
+                ++blocks;
+            }
+        });
+        return (float) (ageSum / juce::jmax (1, blocks));
+    };
+
+    const auto plainDelay = averageAgeAt (0.0f, 0.0f, 10.0, 3.0);
+    const auto scattered  = averageAgeAt (100.0f, 0.0f, 10.0, 3.0);
+    const auto recirculated = averageAgeAt (0.0f, 90.0f, 0.3, 2.0);
+
+    check (plainDelay > 0.05f && plainDelay < 0.2f, "a plain 100 ms delay plays ~100 ms old audio");
+    check (scattered > plainDelay * 5.0f, "spread=100 plays much older audio than Time alone");
+    check (recirculated > 1.0f, "a tail that has recirculated for 2 s is over a second old");
+}
+
+// A Level curve from 1 to 0 over Lifetime is a hard stop on the tail's age,
+// whatever Feedback says.
+void testLevelCurveKillsTheTail()
+{
+    const auto tailAt = [] (bool enableCurve)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 95.0f);
+        setParam (*p, params::id::lifetime, 1000.0f);
+        setLine (*p, lifetime::Destination::level, 1.0f, 0.0f, enableCurve);
+
+        Audio out;
+        render (*p, 3.0, toneThenSilence (220.0, 0.3), out);
+        return peakSeconds (out, 2.0, 3.0);
+    };
+
+    check (tailAt (false) > 1.0e-2f, "without the Level curve a 95 % tail is still loud at 2 s");
+    check (tailAt (true) < 1.0e-3f, "a Level curve to zero over a 1 s Lifetime ends the tail");
+}
+
+// A Pitch curve maps age to pitch. With feedback off, Time *is* the age of
+// what a grain plays, so audio read from a second ago has to come back higher
+// than audio read from 100 ms ago. (Compounding through the loop is the same
+// mechanism the shimmer test already proves.)
+void testPitchCurveRaisesOlderAudio()
+{
+    const auto pitchAtTime = [] (float timeMs)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, timeMs);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::size, 100.0f);
+        setParam (*p, params::id::pitchSpread, 5.0f); // decorrelates the comb, one pass so no random walk
+        setParam (*p, params::id::lifetime, 2000.0f);
+        setLine (*p, lifetime::Destination::pitchOffset, 0.5f, 0.75f, true); // 0 -> +12 st over 2 s
+
+        Audio out;
+        render (*p, 2.5, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out);
+        return dominantFrequency (out[0], atSecond (2.0), atSecond (2.4));
+    };
+
+    const auto young = pitchAtTime (100.0f);   // age 0.1 s -> +0.6 st
+    const auto old   = pitchAtTime (1000.0f);  // age 1.0 s -> +6 st
+
+    check (young > 210.0 && young < 245.0, "pitch curve leaves 100 ms-old audio near its own pitch");
+    check (old > young * 1.25, "pitch curve plays second-old audio a good fourth higher");
+}
+
+// LP tilt per pass compounds: every pass lowers the cutoff, so a bright tail
+// dies far sooner than its feedback alone would let it.
+void testDegradeTiltDampsTheTail()
+{
+    const auto tailWithTilt = [] (float tiltHz)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 90.0f);
+        setParam (*p, params::id::fbLowpass, 8000.0f);
+        setParam (*p, params::id::degradeTilt, tiltHz);
+
+        Audio out;
+        render (*p, 2.2, toneThenSilence (4000.0, 0.3), out);
+        return peakSeconds (out, 1.8, 2.2);
+    };
+
+    const auto clean  = tailWithTilt (0.0f);
+    const auto tilted = tailWithTilt (500.0f);
+
+    check (clean > 1.0e-4f, "an untilted bright tail is still audible at 2 s");
+    check (tilted < clean * 0.3f, "500 Hz/pass tilt kills the bright tail well before that");
+}
+
+// Bit and sample-rate reduction per pass compound with age and stay bounded.
+void testDegradeBitsAndRateChangeTheTail()
+{
+    const auto renderTail = [] (float bitsPerPass, float ratePerPass, Audio& out)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 90.0f);
+        setParam (*p, params::id::degradeBits, bitsPerPass);
+        setParam (*p, params::id::degradeRate, ratePerPass);
+        render (*p, 2.0, toneThenSilence (220.0, 0.3), out);
+    };
+
+    Audio clean, crushed;
+    renderTail (0.0f, 0.0f, clean);
+    renderTail (2.0f, 10.0f, crushed);
+
+    double difference = 0.0;
+    for (size_t i = atSecond (1.0); i < atSecond (2.0); ++i)
+        difference += std::pow ((double) clean[0][i] - (double) crushed[0][i], 2.0);
+    difference = std::sqrt (difference / (double) atSecond (1.0));
+
+    check (allFinite (crushed) && peakSeconds (crushed, 0.0, 2.0) < 4.0f, "degraded tail stays finite and bounded");
+    check (difference > 0.2 * rms (clean[0], atSecond (1.0), atSecond (2.0)),
+           "bits/pass and SR/pass audibly change the tail as it ages");
+}
+
+// Noise per pass is the one Degrade control that adds rather than removes,
+// so it shows up even with nothing coming in.
+void testDegradeNoiseAddsHiss()
+{
+    const auto hiss = [] (float noise)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::degradeNoise, noise);
+
+        Audio out;
+        render (*p, 2.0, [] (int64_t, int) { return 0.0f; }, out);
+        return peakSeconds (out, 1.0, 2.0);
+    };
+
+    check (hiss (0.0f) < 1.0e-12f, "noise/pass at 0 keeps silence-in-silence-out");
+    const auto level = hiss (100.0f);
+    check (level > 1.0e-4f && level < 0.05f, "noise/pass at 100 adds hiss around -40 dB");
+}
+
+// Pitch drift per pass compounds through the loop: after a dozen passes at
+// +50 cents the tail is a good half-octave above where it started.
+void testDegradeDriftRaisesThePitch()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::size, 100.0f);
+    // The drift shifter is in the loop, not per grain: grains stay at rate 1,
+    // read coherently at Spread 0, and the whole tail climbs together.
+    setParam (*p, params::id::feedback, 90.0f);
+    setParam (*p, params::id::degradeDrift, 50.0f);
+    setParam (*p, params::id::degradeDriftDir, 0.0f); // Up
+
+    Audio out;
+    render (*p, 1.6, toneThenSilence (220.0, 0.3), out);
+
+    const auto later = dominantFrequency (out[0], atSecond (1.2), atSecond (1.5));
+    check (later > 220.0 * 1.25, "+50 ct/pass drift has raised the tail by over 4 st at 1.2 s");
+}
+
+// Reverse driven by Age (5.7) is the Reverse curve destination.
+void testReverseCurveRenders()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 200.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::feedback, 80.0f);
+    setParam (*p, params::id::lifetime, 1000.0f);
+    setLine (*p, lifetime::Destination::reverse, 0.0f, 1.0f, true);
+
+    Audio out;
+    render (*p, 2.0, toneThenSilence (220.0, 0.3), out);
+
+    check (allFinite (out), "age-driven Reverse renders finite audio");
+    check (peakSeconds (out, 1.0, 2.0) > 1.0e-3f, "age-driven Reverse still produces a tail");
+}
+
+void testCurveStateRoundTrips()
+{
+    auto p = makeProcessor();
+    auto curves = p->getCurves();
+    auto& curve = curves.curves[(size_t) lifetime::Destination::lowpass];
+    curve.numPoints = 3;
+    curve.points[0] = { 0.0f, 1.0f, 0.0f };
+    curve.points[1] = { 0.3f, 0.2f, 0.6f };
+    curve.points[2] = { 1.0f, 0.9f, -0.4f };
+    p->setCurves (curves);
+    setParam (*p, params::id::curveEnable[(size_t) lifetime::Destination::lowpass], 1.0f);
+
+    juce::MemoryBlock state;
+    p->getStateInformation (state);
+
+    auto q = makeProcessor();
+    q->setStateInformation (state.getData(), (int) state.getSize());
+    const auto restored = q->getCurves().curves[(size_t) lifetime::Destination::lowpass];
+
+    const auto same = restored.numPoints == 3
+                   && std::abs (restored.points[1].x - 0.3f) < 1.0e-5f
+                   && std::abs (restored.points[1].y - 0.2f) < 1.0e-5f
+                   && std::abs (restored.points[1].bend - 0.6f) < 1.0e-5f
+                   && std::abs (restored.points[2].bend + 0.4f) < 1.0e-5f;
+    check (same, "Lifetime Curve points survive get/setStateInformation");
+    check (getParam (*q, params::id::curveEnable[(size_t) lifetime::Destination::lowpass]) >= 0.5f,
+           "curve enable state survives too");
+    check (std::abs (restored.evaluate (0.3f) - 0.2f) < 1.0e-4f, "restored curve evaluates through its points");
+}
+
+// ---- Phase 6: Rewind ----------------------------------------------------------
+
+// A decaying tail captured and played back reversed comes out *rising*, and
+// it arrives through the feedback path into the main buffer.
+void testRewindManualSwellsReversed()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::rewindOn, 1.0f);
+    setParam (*p, params::id::rewindTrigger, 3.0f); // Manual
+    setParam (*p, params::id::rewindLength, 500.0f);
+    setParam (*p, params::id::rewindLevel, 100.0f);
+    setParam (*p, params::id::rewindPitch, 0.0f);
+
+    Audio out;
+    render (*p, 1.6, decayingBurst (220.0, 0.3, 0.1), out, [&] (int64_t blockStart)
+    {
+        if (blockStart == atSecond (0.6) / kBlockSize * kBlockSize)
+        {
+            setParam (*p, params::id::rewindManual, 1.0f);
+            setParam (*p, params::id::rewindManual, 0.0f);
+        }
+    });
+
+    check (peakSeconds (out, 0.55, 0.78) < 1.0e-4f, "the tail is gone before the rewind arrives");
+    check (peakSeconds (out, 0.9, 1.25) > 1.0e-2f, "the rewound tail swells up through the loop");
+    check (peakSeconds (out, 1.05, 1.25) > peakSeconds (out, 0.85, 0.95) * 1.5f,
+           "the rewound tail rises where the original fell");
+    check (allFinite (out), "rewind output is finite");
+}
+
+// Threshold trigger: when the tail falls below the threshold, it is rewound
+// and swells back — audible where an un-rewound tail would be gone.
+void testRewindThresholdRefiresTheTail()
+{
+    const auto lateLevel = [] (bool rewind)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 70.0f);
+        setParam (*p, params::id::rewindOn, rewind ? 1.0f : 0.0f);
+        setParam (*p, params::id::rewindTrigger, 2.0f); // Threshold
+        setParam (*p, params::id::rewindThreshold, -40.0f);
+        setParam (*p, params::id::rewindLength, 1000.0f);
+        setParam (*p, params::id::rewindLevel, 100.0f);
+
+        Audio out;
+        render (*p, 4.5, toneThenSilence (220.0, 0.3), out);
+        return std::make_pair (peakSeconds (out, 3.0, 4.0), allFinite (out));
+    };
+
+    const auto [withRewind, finite] = lateLevel (true);
+    const auto [without, finite2]   = lateLevel (false);
+
+    check (finite && finite2, "threshold-triggered rewinds stay finite");
+    check (withRewind > 1.0e-3f && withRewind > without * 3.0f,
+           "threshold rewind keeps the tail alive where it would have died");
+}
+
+// Timer trigger: every interval the last capture is added back, which lifts
+// the wet level for the length of the rewind.
+void testRewindTimerBumpsPeriodically()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::density, 60.0f);
+    setParam (*p, params::id::rewindOn, 1.0f);
+    setParam (*p, params::id::rewindTrigger, 0.0f); // Timer
+    setParam (*p, params::id::rewindInterval, 1.0f);
+    setParam (*p, params::id::rewindLength, 500.0f);
+    setParam (*p, params::id::rewindLevel, 100.0f);
+
+    juce::Random noise (7);
+    Audio out;
+    render (*p, 3.0, [&noise] (int64_t, int) { return noise.nextFloat() * 0.6f - 0.3f; }, out);
+
+    const auto quiet1 = rms (out[0], atSecond (0.60), atSecond (0.95));
+    const auto bump1  = rms (out[0], atSecond (1.15), atSecond (1.50));
+    const auto quiet2 = rms (out[0], atSecond (1.65), atSecond (1.95));
+    const auto bump2  = rms (out[0], atSecond (2.15), atSecond (2.50));
+
+    check (bump1 > quiet1 * 1.25 && bump2 > quiet2 * 1.25, "timer rewinds lift the wet level once a second");
+}
+
+void testRewindRestartStaysClean()
+{
+    auto p = makeProcessor();
+    configureAsPlainDelay (*p);
+    setParam (*p, params::id::time, 100.0f);
+    setParam (*p, params::id::feedback, 60.0f);
+    setParam (*p, params::id::rewindOn, 1.0f);
+    setParam (*p, params::id::rewindTrigger, 3.0f); // Manual
+    setParam (*p, params::id::rewindLength, 800.0f);
+    setParam (*p, params::id::rewindPitch, -12.0f);
+
+    Audio out;
+    render (*p, 2.5, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out, [&] (int64_t blockStart)
+    {
+        const auto first  = atSecond (1.0) / kBlockSize * kBlockSize;
+        const auto second = atSecond (1.1) / kBlockSize * kBlockSize;
+        if (blockStart == first || blockStart == second)
+        {
+            setParam (*p, params::id::rewindManual, 1.0f);
+            setParam (*p, params::id::rewindManual, 0.0f);
+        }
+    });
+
+    check (allFinite (out), "restarting a rewind mid-playback stays finite");
+    check (peakSeconds (out, 1.0, 2.5) < 4.0f, "restarting a rewind stays bounded");
+}
+
 } // namespace
 
 int main()
@@ -921,6 +1312,21 @@ int main()
     testChokeKillsTheTail();
     testEnvelopeDrivesDensity();
     testSyncAndSwingPlaceGrainsOnTheGrid();
+
+    testAgeTracksHowOldTheAudioIs();
+    testLevelCurveKillsTheTail();
+    testPitchCurveRaisesOlderAudio();
+    testDegradeTiltDampsTheTail();
+    testDegradeBitsAndRateChangeTheTail();
+    testDegradeNoiseAddsHiss();
+    testDegradeDriftRaisesThePitch();
+    testReverseCurveRenders();
+    testCurveStateRoundTrips();
+
+    testRewindManualSwellsReversed();
+    testRewindThresholdRefiresTheTail();
+    testRewindTimerBumpsPeriodically();
+    testRewindRestartStaysClean();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

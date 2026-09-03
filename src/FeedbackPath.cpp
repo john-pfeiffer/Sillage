@@ -17,6 +17,12 @@ constexpr double kShimmerMinDelay = 4.0;
 constexpr std::array<double, 4> kDiffuseMsLeft  { 4.7, 8.3, 13.9, 22.7 };
 constexpr std::array<double, 4> kDiffuseMsRight { 5.3, 9.7, 15.1, 25.9 };
 
+// Degrade floors from the handoff.
+constexpr float  kMinBits         = 4.0f;
+constexpr double kMinSampleRateHz = 4000.0;
+constexpr float  kMinTiltHz       = 200.0f;
+constexpr float  kNoiseFullScale  = 0.01f;   // -40 dB at Noise = 100 %
+
 // Triangle wavefolder: reflects around +/-1 instead of clipping at it.
 float fold (float x) noexcept
 {
@@ -160,6 +166,7 @@ void FeedbackPath::prepare (double newSampleRate, int numChannels)
     lowpass.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
 
     shimmer.prepare (newSampleRate, channels);
+    drift.prepare (newSampleRate, channels);
 
     for (int channel = 0; channel < 2; ++channel)
     {
@@ -179,10 +186,19 @@ void FeedbackPath::reset()
     highpass.reset();
     lowpass.reset();
     shimmer.reset();
+    drift.reset();
 
     for (auto& channel : diffusers)
         for (auto& stage : channel)
             stage.reset();
+
+    lastPasses = -1;
+    holdPhase  = 0.0;
+    held.fill (0.0f);
+    tiltState.fill (0.0f);
+    for (auto& state : pinkState)
+        state.fill (0.0f);
+    driftRedrawLeft = 0.0;
 
     limiterGain = 1.0f;
 }
@@ -202,9 +218,58 @@ void FeedbackPath::setSettings (const Settings& settings)
 
     driveGain    = 1.0f + settings.drive * 11.0f;
     diffuseCoeff = settings.diffuse * 0.7f;
+
+    degradeActive = settings.degradeBitsPerPass > 0.0f
+                 || settings.baseBits < 24.0f
+                 || settings.degradeRatePerPass > 0.0f
+                 || (settings.baseSampleRateHz > 0.0f && settings.baseSampleRateHz < sampleRate * 0.999)
+                 || settings.degradeTiltHzPerPass > 0.0f
+                 || settings.degradeNoise > 0.0f;
+
+    driftActive = settings.degradeDriftCents > 0.0f;
+    if (settings.driftDirection == 0)      driftSign = 1.0f;
+    else if (settings.driftDirection == 1) driftSign = -1.0f;
+    drift.setSemitones (driftSign * settings.degradeDriftCents * 0.01f);
+
+    lastPasses = -1; // force a recompute on the next frame
 }
 
-void FeedbackPath::processFrame (float* samples, int numChannels) noexcept
+void FeedbackPath::updateDegradeForPasses (int passes) noexcept
+{
+    lastPasses = passes;
+    const auto p = (float) passes;
+
+    const auto bits = juce::jlimit (kMinBits, 24.0f, current.baseBits - p * current.degradeBitsPerPass);
+    quantStep = bits < 23.99f ? std::exp2 (1.0f - std::round (bits)) : 0.0f;
+
+    const auto baseRate = current.baseSampleRateHz > 0.0f ? (double) current.baseSampleRateHz : sampleRate;
+    const auto rate     = juce::jmax (kMinSampleRateHz,
+                                      baseRate * std::pow (1.0 - (double) current.degradeRatePerPass, (double) passes));
+    holdRatio = rate < sampleRate * 0.999 ? sampleRate / rate : 1.0;
+
+    if (current.degradeTiltHzPerPass > 0.0f)
+    {
+        const auto cutoff = juce::jmax (kMinTiltHz, current.lowpassHz - p * current.degradeTiltHzPerPass);
+        tiltCoeff = (float) (1.0 - std::exp (-juce::MathConstants<double>::twoPi * (double) cutoff / sampleRate));
+    }
+    else
+    {
+        tiltCoeff = 1.0f;
+    }
+}
+
+float FeedbackPath::pinkNoise (int channel) noexcept
+{
+    // Paul Kellet's economy pink filter: three one-poles on white noise.
+    const auto white = noiseRng.nextFloat() * 2.0f - 1.0f;
+    auto& s = pinkState[(size_t) channel];
+    s[0] = 0.99765f * s[0] + white * 0.0990460f;
+    s[1] = 0.96300f * s[1] + white * 0.2965164f;
+    s[2] = 0.57000f * s[2] + white * 1.0526913f;
+    return (s[0] + s[1] + s[2] + white * 0.1848f) * 0.2f;
+}
+
+void FeedbackPath::processFrame (float* samples, int numChannels, float ageSeconds) noexcept
 {
     const auto active = juce::jmin (numChannels, 2);
 
@@ -244,6 +309,70 @@ void FeedbackPath::processFrame (float* samples, int numChannels) noexcept
 
     for (int channel = 0; channel < active; ++channel)
         samples[channel] = saturate (samples[channel], current.satType, driveGain);
+
+    // Degrade: cheap, cumulative, and driven by how old the audio is — the way
+    // tape and BBD delays fall apart a little more on every pass.
+    if (degradeActive)
+    {
+        const auto passes = (int) (juce::jmax (0.0f, ageSeconds) / (float) juce::jmax (0.001, current.passSeconds));
+        if (passes != lastPasses)
+            updateDegradeForPasses (passes);
+
+        if (holdRatio > 1.0)
+        {
+            holdPhase += 1.0;
+            if (holdPhase >= holdRatio)
+            {
+                holdPhase -= holdRatio;
+                for (int channel = 0; channel < active; ++channel)
+                    held[(size_t) channel] = samples[channel];
+            }
+            for (int channel = 0; channel < active; ++channel)
+                samples[channel] = held[(size_t) channel];
+        }
+
+        if (quantStep > 0.0f)
+            for (int channel = 0; channel < active; ++channel)
+                samples[channel] = std::round (samples[channel] / quantStep) * quantStep;
+
+        if (tiltCoeff < 1.0f)
+            for (int channel = 0; channel < active; ++channel)
+            {
+                auto& state = tiltState[(size_t) channel];
+                state += (samples[channel] - state) * tiltCoeff;
+                samples[channel] = state;
+            }
+
+        if (current.degradeNoise > 0.0f)
+            for (int channel = 0; channel < active; ++channel)
+                samples[channel] += pinkNoise (channel) * current.degradeNoise * kNoiseFullScale;
+    }
+
+    if (driftActive)
+    {
+        // Random direction re-draws once per pass so the drift wanders rather
+        // than running away in one direction.
+        if (current.driftDirection == 2)
+        {
+            driftRedrawLeft -= 1.0;
+            if (driftRedrawLeft <= 0.0)
+            {
+                driftRedrawLeft = juce::jmax (1.0, current.passSeconds * sampleRate);
+                driftSign = noiseRng.nextBool() ? 1.0f : -1.0f;
+                drift.setSemitones (driftSign * current.degradeDriftCents * 0.01f);
+            }
+        }
+
+        float shifted[2] { samples[0], active > 1 ? samples[1] : 0.0f };
+        drift.processFrame (shifted, active);
+        for (int channel = 0; channel < active; ++channel)
+            samples[channel] = shifted[channel];
+    }
+    else
+    {
+        float discard[2] { samples[0], active > 1 ? samples[1] : 0.0f };
+        drift.processFrame (discard, active);
+    }
 
     // Brickwall, stereo-linked so the image does not shift under gain
     // reduction. Instant attack keeps it a true ceiling; the slow release keeps

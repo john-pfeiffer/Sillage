@@ -78,6 +78,16 @@ Every parameter is exposed to host automation (EVS standard).
 | Sync | Grain Div | 1/64T – 1 bar | Grain spacing when Sync is on (takes over from Density) |
 | Sync | Swing | 0–100 % | Delays every other grain slot; 100 = a 2:1 triplet feel |
 | Output | Panic | momentary | Clears every buffer and grain instantly (automatable) |
+| Age | Lifetime | 100 ms – 30 s | Age is normalised against this for the Lifetime Curves |
+| Age | Bits/pass, SR/pass, Noise/pass, LP tilt/pass | 0–2 bit, 0–10 %, 0–100 %, 0–500 Hz | Per-pass Degrade: driven by the audio's age, so it compounds every time round (floors: 4-bit, 4 kHz, 200 Hz) |
+| Age | Drift/pass, Drift Dir | 0–50 ct, Up / Down / Random | Pitch drift in the loop; Random re-draws its direction every pass |
+| Age | Curve: LP cutoff … Level | on / off ×9 | Enables a Lifetime Curve per destination (LP, HP, Bit depth, Sample rate, Grain size, Pitch offset, Reverse, Pan spread, Level). Curve shapes are drawn in the editor and saved with the session |
+| Rewind | Rewind | on / off | Continuously captures the wet tail |
+| Rewind | Rewind Length | 100 ms – 8 s | How much of the captured tail a trigger plays back |
+| Rewind | Rewind Trig | Timer / Transient / Threshold / Manual | What fires a rewind. Timer uses Rewind Every, or Rewind Div under Sync; Threshold fires when the tail falls below Rewind Thresh |
+| Rewind | Rewind Every, Rewind Div, Rewind Thresh | 0.1–30 s, 1/4 – 8 bars, −60–0 dB | |
+| Rewind | Rewind Level, Rewind Pitch | 0–100 %, ±12 st | The captured tail plays back *reversed* into the feedback path, so it swells up through the colour stages |
+| Rewind | Rewind Now | momentary | Manual trigger (automatable); works in every trigger mode |
 
 The signal chain inside the loop is fixed: `grain sum → HP → LP → Shimmer → Diffuse →
 Saturation → Limiter → buffer`. The limiter is what makes Feedback above 100 % safe, so
@@ -87,9 +97,18 @@ Transient detection reacts a few milliseconds after a hit (about half an FFT win
 plus a hop). That is the responses' reaction time, not plugin latency: the dry path is
 never delayed, and reported latency stays 0.
 
-Build phases 1–4 of the handoff's build order are in. Still to come: Age and Degrade;
-Reverse/Rewind mode; Wake modes and Displace; mod slots and LFOs; Width and the post-loop
-Wet HP/LP; presets and installers; and the Custom user scale for Quantize.
+Every buffer sample carries its **Age** in seconds in a parallel buffer, so a grain knows
+how old the audio it plays is, per-pass Degrade compounds with that age, and the Lifetime
+Curves shape each grain from its own age (global destinations use the average age of the
+live grains). Loudness compensation blends from coherent at Spread 0 to incoherent at
+Spread 100, so Feedback means the same thing across the whole delay-to-reverb range.
+
+Memory per instance at 48 kHz is about 13 MB (10 s audio ring, its age ring, a 12 s Rewind
+capture and its age ring), all allocated in `prepareToPlay`.
+
+Build phases 1–6 of the handoff's build order are in. Still to come: Wake modes and
+Displace; mod slots and LFOs; Width and the post-loop Wet HP/LP; presets and installers;
+and the Custom user scale for Quantize.
 
 ## Development
 

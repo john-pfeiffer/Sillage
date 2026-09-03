@@ -35,8 +35,10 @@ juce_add_plugin(Sillage
     PRODUCT_NAME "Sillage")
 
 set(SILLAGE_SOURCES
+    src/CurveEditor.cpp
     src/FeedbackPath.cpp
     src/GrainEngine.cpp
+    src/LifetimeCurves.cpp
     src/Modulators.cpp
     src/OnsetDetector.cpp
     src/Parameters.cpp

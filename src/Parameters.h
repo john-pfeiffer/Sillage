@@ -73,6 +73,33 @@ namespace id
     inline constexpr auto sync          = "sync";
     inline constexpr auto grainDivision = "grainDivision";
     inline constexpr auto swing         = "swing";
+
+    // Age & per-pass Degrade (5.6)
+    inline constexpr auto lifetime        = "lifetime";
+    inline constexpr auto degradeBits     = "degradeBits";
+    inline constexpr auto degradeRate     = "degradeRate";
+    inline constexpr auto degradeNoise    = "degradeNoise";
+    inline constexpr auto degradeTilt     = "degradeTilt";
+    inline constexpr auto degradeDrift    = "degradeDrift";
+    inline constexpr auto degradeDriftDir = "degradeDriftDir";
+
+    // Lifetime Curve enables (5.6 B), one per destination, in
+    // lifetime::Destination order.
+    inline constexpr std::array<const char*, 9> curveEnable {
+        "curveLowpass", "curveHighpass", "curveBits", "curveRate", "curveSize",
+        "curvePitch", "curveReverse", "curvePan", "curveLevel"
+    };
+
+    // Rewind (5.7)
+    inline constexpr auto rewindOn        = "rewindOn";
+    inline constexpr auto rewindLength    = "rewindLength";
+    inline constexpr auto rewindTrigger   = "rewindTrigger";
+    inline constexpr auto rewindInterval  = "rewindInterval";
+    inline constexpr auto rewindDivision  = "rewindDivision";
+    inline constexpr auto rewindThreshold = "rewindThreshold";
+    inline constexpr auto rewindLevel     = "rewindLevel";
+    inline constexpr auto rewindPitch     = "rewindPitch";
+    inline constexpr auto rewindManual    = "rewindManual";
 }
 
 // Musical divisions for synced Time, measured in beats (a quarter note = 1 beat).
@@ -119,6 +146,32 @@ inline double divisionSeconds (int index, double bpm, double barBeats) noexcept
     const auto beats    = division.beats < 0.0 ? barBeats : division.beats;
     return beats * 60.0 / juce::jmax (1.0, bpm);
 }
+
+// Longer divisions for the Rewind timer, in beats plus whole bars.
+struct LongDivision
+{
+    const char* name;
+    double beats;
+    double bars;
+};
+
+inline constexpr std::array<LongDivision, 6> kLongDivisions { {
+    { "1/4",    1.0, 0.0 },
+    { "1/2",    2.0, 0.0 },
+    { "1 bar",  0.0, 1.0 },
+    { "2 bars", 0.0, 2.0 },
+    { "4 bars", 0.0, 4.0 },
+    { "8 bars", 0.0, 8.0 },
+} };
+
+inline double longDivisionSeconds (int index, double bpm, double barBeats) noexcept
+{
+    const auto clamped  = (size_t) juce::jlimit (0, (int) kLongDivisions.size() - 1, index);
+    const auto division = kLongDivisions[clamped];
+    return (division.beats + division.bars * barBeats) * 60.0 / juce::jmax (1.0, bpm);
+}
+
+enum class RewindTrigger { timer = 0, transient, threshold, manual };
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 } // namespace params

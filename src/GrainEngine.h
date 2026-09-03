@@ -2,8 +2,11 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <array>
+#include <atomic>
+#include <vector>
 
 #include "FeedbackPath.h"
+#include "LifetimeCurves.h"
 #include "Scales.h"
 
 // Hard cap on simultaneously sounding grains. Compile-time by design (EVS DSP
@@ -21,6 +24,12 @@ inline constexpr int kGrainSlots = kMaxGrains + kStealSlots;
 // reach Spread has.
 inline constexpr double kBufferSeconds = 10.0;
 
+// Rewind (5.7) captures the wet tail into a secondary ring. 8 s is the longest
+// Rewind Length; the headroom keeps the capture head from overrunning a
+// playback that is pitched down.
+inline constexpr double kRewindCaptureSeconds = 12.0;
+inline constexpr double kRewindMaxSeconds     = 8.0;
+
 enum class WindowShape
 {
     hann = 0,
@@ -34,6 +43,10 @@ enum class WindowShape
 // windowed grains that read back from it and sum to the wet output. The grain
 // sum is written back into the buffer through the feedback path, which always
 // ends in a brickwall limiter.
+//
+// Every buffer sample carries its Age (5.6) in a parallel ring, so a grain
+// knows how old the audio it plays is, and the feedback path can degrade
+// audio by that age.
 class GrainEngine
 {
 public:
@@ -68,10 +81,22 @@ public:
         bool   sync                = false;
         double syncIntervalSamples = 0.0;
         float  swing               = 0.0f; // 0..1
+
+        // Age & Lifetime Curves (5.6). Per-grain destinations resolve at birth
+        // from that grain's normalised age.
+        double lifetimeSeconds = 2.0;
+        const lifetime::CurveSet* curves = nullptr;
+        std::array<bool, lifetime::kNumDestinations> curveEnabled {};
+
+        // Rewind (5.7).
+        bool   rewindOn            = false;
+        double rewindLengthSamples = 0.0;
+        float  rewindLevel         = 1.0f;
+        double rewindRate          = 1.0;  // 2^(pitch/12)
     };
 
-    // What a detected transient does inside the engine (5.5). Duck lives in
-    // the processor because it acts on the wet output, not the buffer.
+    // What a detected transient does inside the engine (5.5, 5.7). Duck lives
+    // in the processor because it acts on the wet output, not the buffer.
     struct TransientResponse
     {
         bool   retrigger            = false;
@@ -84,6 +109,8 @@ public:
         float  chokeAmount         = 1.0f;
         double chokeFadeSamples    = 0.0;
         double chokeProtectSamples = 0.0; // the hit itself, kept out of the sweep
+
+        bool   rewind = false; // Rewind trigger mode is Transient
     };
 
     void prepare (double sampleRate, int numChannels);
@@ -101,10 +128,20 @@ public:
                   int numOnsets,
                   const TransientResponse& response);
 
+    // Starts (or restarts, with a crossfade) a reversed playback of the last
+    // Rewind Length of captured tail into the feedback path.
+    void triggerRewind() noexcept { rewindRequested = true; }
+    bool isRewinding() const noexcept;
+
     FeedbackPath& getFeedbackPath() noexcept { return feedbackPath; }
 
     // Live grain count, for the debug menu and the cap test.
     int getActiveGrainCount() const noexcept { return activeGrains; }
+
+    // Amplitude-weighted average age of what the live grains are playing,
+    // in seconds, over the last processed block. Global curve destinations
+    // and (later) the mod matrix read this.
+    float getAverageAgeSeconds() const noexcept { return averageAgeSeconds.load (std::memory_order_relaxed); }
 
     // True once Freeze has fully engaged and the write head has stopped.
     bool isFrozen() const noexcept { return writeGain <= 0.0f; }
@@ -125,6 +162,7 @@ private:
         float       fadeStep  = 0.0f;
         bool        stolen    = false;
         int64_t     birth     = 0;
+        float       ageSeconds = 0.0f; // age of the audio at birth
 
         // Choke ramps a grain's level toward a target over a short fade.
         float scale           = 1.0f;
@@ -133,14 +171,40 @@ private:
         int   scaleSamplesLeft = 0;
     };
 
+    // What the Lifetime Curves resolve to for one grain at birth.
+    struct GrainShape
+    {
+        double lengthSamples      = 0.0;
+        float  pitchOffset        = 0.0f;
+        float  reverseProbability = 0.0f;
+        float  panSpread          = 0.0f;
+        float  level              = 1.0f;
+    };
+
+    struct RewindVoice
+    {
+        bool   active    = false;
+        double readPos   = 0.0;
+        double remaining = 0.0;
+        float  fade      = 0.0f;
+        float  fadeStep  = 0.0f;
+        bool   fadingOut = false;
+    };
+
     float readInterpolated (int channel, double position) const noexcept;
-    float resolvePitchRate (const Settings& settings) noexcept;
-    void  activateGrain (double startPos, double rate, const Settings& settings, float gainScale);
+    float ageAt (double position) const noexcept;
+    float ageOfRegion (double startPos, double span) const noexcept;
+    GrainShape resolveShape (const Settings& settings, float ageSeconds) noexcept;
+    float resolvePitchRate (const Settings& settings, float pitchOffset) noexcept;
+    void  activateGrain (double startPos, double rate, const Settings& settings,
+                         const GrainShape& shape, float gainScale, float ageSeconds);
     void  spawnScheduledGrain (const Settings& settings);
     void  spawnBurstGrain (const Settings& settings);
     void  beginBurst (const TransientResponse& response);
     void  beginChoke (const TransientResponse& response);
     void  advanceChoke() noexcept;
+    void  beginRewind (const Settings& settings) noexcept;
+    float readRewind (int channel, double position) const noexcept;
     int   claimSlot();
 
     double sampleRate = 44100.0;
@@ -148,6 +212,7 @@ private:
     int    capacity   = 0;
     int    writePos   = 0;
     juce::AudioBuffer<float> ring;
+    std::vector<float> ageRing; // age in seconds of each sample when written
 
     std::array<Grain, kGrainSlots> grains {};
     int     activeGrains = 0;
@@ -191,6 +256,17 @@ private:
     int   chokeChunk          = 0;
     int   chokeSweepPos       = 0;
     float chokeGain           = 1.0f;
+
+    // Rewind capture and playback.
+    juce::AudioBuffer<float> rewindRing;
+    std::vector<float> rewindAgeRing;
+    int    rewindCapacity  = 0;
+    int    rewindWritePos  = 0;
+    std::array<RewindVoice, 2> rewindVoices {};
+    bool   rewindRequested = false;
+    float  rewindFadeStep  = 0.0f;
+
+    std::atomic<float> averageAgeSeconds { 0.0f };
 
     JUCE_LEAK_DETECTOR (GrainEngine)
 };

@@ -3,7 +3,8 @@
 
 namespace
 {
-// One row per UI section; extend as build phases land.
+// One entry per UI section; extend as build phases land. Sections that fit
+// side by side share a row.
 const std::vector<std::pair<const char*, std::vector<const char*>>> kSections = {
     { "Grain",      { params::id::time, params::id::timeSync, params::id::timeDivision,
                       params::id::density, params::id::spread, params::id::size,
@@ -15,39 +16,52 @@ const std::vector<std::pair<const char*, std::vector<const char*>>> kSections = 
                       params::id::fbResonance, params::id::shimmerInterval,
                       params::id::shimmerAmount, params::id::shimmerFine,
                       params::id::diffuse, params::id::satType, params::id::drive } },
-    { "Freeze & Chaos", { params::id::freeze, params::id::freezeFade, params::id::chaos,
-                          params::id::randomizeAmount } },
+    { "Sync",       { params::id::sync, params::id::grainDivision, params::id::swing } },
+    { "Output",     { params::id::mix, params::id::output, params::id::fallbackBpm } },
     { "Transients", { params::id::sensitivity,
                       params::id::retriggerOn, params::id::retriggerCount, params::id::retriggerRate,
                       params::id::retriggerDivision, params::id::retriggerAmount, params::id::retriggerOffset,
                       params::id::duckOn, params::id::duckDepth, params::id::duckAttack, params::id::duckRelease,
                       params::id::chokeOn, params::id::chokeAmount, params::id::chokeFade,
                       params::id::envDensity, params::id::envSpread } },
-    { "Sync",       { params::id::sync, params::id::grainDivision, params::id::swing } },
-    { "Output",     { params::id::mix, params::id::output, params::id::fallbackBpm } },
+    { "Freeze & Chaos", { params::id::freeze, params::id::freezeFade, params::id::chaos,
+                          params::id::randomizeAmount } },
+    { "Rewind",     { params::id::rewindOn, params::id::rewindLength, params::id::rewindTrigger,
+                      params::id::rewindInterval, params::id::rewindDivision,
+                      params::id::rewindThreshold, params::id::rewindLevel, params::id::rewindPitch } },
+    { "Age",        { params::id::lifetime, params::id::degradeBits, params::id::degradeRate,
+                      params::id::degradeNoise, params::id::degradeTilt, params::id::degradeDrift,
+                      params::id::degradeDriftDir } },
 };
+
+// The Age section gets the curve editor beside its knobs.
+constexpr const char* kCurveSection = "Age";
 
 constexpr int kKnobW = 76, kKnobH = 84, kLabelH = 16, kHeaderH = 22, kPad = 8;
 constexpr int kTopBarH = 32, kButtonW = 96, kIndicatorSize = 14;
+constexpr int kCurveEditorH = 210, kCurveEditorMinW = 320;
 constexpr int kTimerHz = 30;
 } // namespace
 
 SillageAudioProcessorEditor::SillageAudioProcessorEditor (SillageAudioProcessor& p)
-    : AudioProcessorEditor (p), processor (p)
+    : AudioProcessorEditor (p), processor (p), curveEditor (p)
 {
     buildSections();
+    addAndMakeVisible (curveEditor);
 
     randomizeButton.onClick = [this] { randomize(); };
-    panicButton.onClick     = [this] { panic(); };
+    panicButton.onClick     = [this] { pulse (params::id::panic); };
+    rewindButton.onClick    = [this] { pulse (params::id::rewindManual); };
     addAndMakeVisible (randomizeButton);
     addAndMakeVisible (panicButton);
+    addAndMakeVisible (rewindButton);
 
     lastOnsetCount = processor.getOnsetCount();
     startTimerHz (kTimerHz);
 
     setResizable (true, true);
-    setResizeLimits (640, 480, 2600, 1800);
-    setSize (1240, 960);
+    setResizeLimits (720, 520, 2600, 1800);
+    setSize (1280, 860);
 }
 
 SillageAudioProcessorEditor::~SillageAudioProcessorEditor()
@@ -114,12 +128,17 @@ void SillageAudioProcessorEditor::randomize()
 {
     const auto amount = processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f;
     randomize::apply (processor.apvts, amount, randomizeRng);
+
+    // Curves are randomised too (5.10); they live in the state tree.
+    auto curves = processor.getCurves();
+    lifetime::randomise (curves, amount, randomizeRng);
+    processor.setCurves (curves);
 }
 
-void SillageAudioProcessorEditor::panic()
+void SillageAudioProcessorEditor::pulse (const char* parameterId)
 {
-    // Pulse the momentary parameter; the processor clears on the rising edge.
-    if (auto* param = processor.apvts.getParameter (params::id::panic))
+    // Momentary parameters: the processor acts on the rising edge.
+    if (auto* param = processor.apvts.getParameter (parameterId))
     {
         param->setValueNotifyingHost (1.0f);
         param->setValueNotifyingHost (0.0f);
@@ -129,21 +148,25 @@ void SillageAudioProcessorEditor::panic()
 void SillageAudioProcessorEditor::timerCallback()
 {
     const auto count = processor.getOnsetCount();
+    bool repaintIndicator = false;
+
     if (count != lastOnsetCount)
     {
         lastOnsetCount = count;
         hitGlow = 1.0f;
+        repaintIndicator = true;
     }
     else if (hitGlow > 0.0f)
     {
         hitGlow = juce::jmax (0.0f, hitGlow - 4.0f / (float) kTimerHz); // ~250 ms decay
-    }
-    else
-    {
-        return;
+        repaintIndicator = true;
     }
 
-    repaint (hitIndicatorBounds.expanded (2));
+    if (repaintIndicator)
+        repaint (hitIndicatorBounds.expanded (2));
+
+    // The curve editor shows where the live tail sits on its curve.
+    curveEditor.repaint();
 }
 
 void SillageAudioProcessorEditor::paint (juce::Graphics& g)
@@ -154,8 +177,7 @@ void SillageAudioProcessorEditor::paint (juce::Graphics& g)
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
 
     for (const auto& section : sections)
-        g.drawText (section.name, kPad, section.headerY, getWidth() - kPad * 2, kHeaderH,
-                    juce::Justification::centredLeft);
+        g.drawText (section.name, section.header, juce::Justification::centredLeft);
 
     // Hit indicator: a plain square that lights on a transient and fades.
     g.setColour (juce::Colours::white.withAlpha (0.25f));
@@ -173,24 +195,43 @@ void SillageAudioProcessorEditor::resized()
 {
     randomizeButton.setBounds (kPad, kPad, kButtonW, kTopBarH - 8);
     panicButton.setBounds (kPad * 2 + kButtonW, kPad, kButtonW, kTopBarH - 8);
-    hitIndicatorBounds = { kPad * 3 + kButtonW * 2 + 8, kPad + (kTopBarH - 8 - kIndicatorSize) / 2,
+    rewindButton.setBounds (kPad * 3 + kButtonW * 2, kPad, kButtonW, kTopBarH - 8);
+    hitIndicatorBounds = { kPad * 4 + kButtonW * 3 + 8, kPad + (kTopBarH - 8 - kIndicatorSize) / 2,
                            kIndicatorSize, kIndicatorSize };
 
-    const auto perRow = juce::jmax (1, (getWidth() - kPad * 2) / kKnobW);
-    int y = kPad + kTopBarH;
+    const auto width  = getWidth();
+    const auto rowH   = kKnobH + kLabelH;
+    const auto totalPerRow = juce::jmax (1, (width - kPad * 2) / kKnobW);
+
+    // Flow layout: a section starts a new band unless it fits beside the
+    // previous one on a single row.
+    int bandX = kPad, bandY = kPad + kTopBarH, bandH = 0;
 
     for (auto& section : sections)
     {
-        section.headerY = y;
-        y += kHeaderH;
+        const auto count      = (int) section.controls.size();
+        const auto isCurve    = section.name == kCurveSection;
+        const auto sectionW   = juce::jmin (count, totalPerRow) * kKnobW
+                              + (isCurve ? kPad + kCurveEditorMinW : 0);
+        const auto fitsBeside = bandX > kPad && bandX + sectionW <= width - kPad;
+
+        if (! fitsBeside && bandX > kPad)
+        {
+            bandY += bandH + kPad;
+            bandX  = kPad;
+            bandH  = 0;
+        }
+
+        const auto perRow = juce::jmax (1, (width - bandX - kPad - (isCurve ? kPad + kCurveEditorMinW : 0)) / kKnobW);
+        section.header = { bandX, bandY, juce::jmin (count, perRow) * kKnobW, kHeaderH };
 
         int index = 0;
         for (auto& control : section.controls)
         {
             const auto column = index % perRow;
             const auto row    = index / perRow;
-            const auto x      = kPad + column * kKnobW;
-            const auto top    = y + row * (kKnobH + kLabelH);
+            const auto x      = bandX + column * kKnobW;
+            const auto top    = bandY + kHeaderH + row * rowH;
 
             control.label->setBounds (x, top, kKnobW, kLabelH);
 
@@ -211,7 +252,19 @@ void SillageAudioProcessorEditor::resized()
             ++index;
         }
 
-        const auto rows = ((int) section.controls.size() + perRow - 1) / perRow;
-        y += rows * (kKnobH + kLabelH) + kPad;
+        const auto rows     = (count + perRow - 1) / perRow;
+        auto sectionH       = kHeaderH + rows * rowH;
+        auto usedW          = juce::jmin (count, perRow) * kKnobW;
+
+        if (isCurve)
+        {
+            const auto editorX = bandX + usedW + kPad;
+            curveEditor.setBounds (editorX, bandY + kHeaderH, width - kPad - editorX, kCurveEditorH);
+            sectionH = juce::jmax (sectionH, kHeaderH + kCurveEditorH);
+            usedW    = width - kPad - bandX;
+        }
+
+        bandH  = juce::jmax (bandH, sectionH);
+        bandX += usedW + kPad * 2;
     }
 }
