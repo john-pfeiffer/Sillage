@@ -1,6 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+
+#include "GrainEngine.h"
 #include "Parameters.h"
 
 class SillageAudioProcessor : public juce::AudioProcessor
@@ -34,13 +36,29 @@ public:
     // Host tempo if available this block, else the user-set fallback BPM.
     double getEffectiveBpm() const { return effectiveBpm.load(); }
 
+    // Live grain count, for the debug menu.
+    int getActiveGrainCount() const noexcept { return engine.getActiveGrainCount(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
+    float parameterValue (const char* id) const noexcept
+    {
+        return apvts.getRawParameterValue (id)->load();
+    }
+
+    void updateTransport();
+    GrainEngine::Settings resolveGrainSettings() const;
+    FeedbackPath::Settings resolveFeedbackSettings() const;
+
     std::atomic<double> effectiveBpm { 120.0 };
+    std::atomic<double> barBeats { 4.0 };
+
+    GrainEngine engine;
 
     juce::SmoothedValue<float> mixSmoothed, outputGainSmoothed;
     juce::AudioBuffer<float> wetBuffer;
+    double currentSampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SillageAudioProcessor)
 };

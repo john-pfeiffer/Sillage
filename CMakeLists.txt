@@ -27,7 +27,7 @@ juce_add_plugin(Sillage
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
-    PLUGIN_MANUFACTURER_CODE Evst
+    PLUGIN_MANUFACTURER_CODE Evsy
     PLUGIN_CODE Slge
     FORMATS VST3 AU Standalone
     VST3_CATEGORIES Fx Delay Reverb
@@ -35,6 +35,8 @@ juce_add_plugin(Sillage
     PRODUCT_NAME "Sillage")
 
 set(SILLAGE_SOURCES
+    src/FeedbackPath.cpp
+    src/GrainEngine.cpp
     src/Parameters.cpp
     src/PluginProcessor.cpp
     src/PluginEditor.cpp)

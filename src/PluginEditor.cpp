@@ -4,7 +4,17 @@ namespace
 {
 // One row per UI section; extend as build phases land.
 const std::vector<std::pair<const char*, std::vector<const char*>>> kSections = {
-    { "Output", { params::id::mix, params::id::output, params::id::fallbackBpm } },
+    { "Grain",    { params::id::time, params::id::timeSync, params::id::timeDivision,
+                    params::id::density, params::id::spread, params::id::size,
+                    params::id::window } },
+    { "Pitch",    { params::id::pitch, params::id::pitchFine, params::id::pitchSpread,
+                    params::id::quantize, params::id::quantizeRoot,
+                    params::id::panSpread, params::id::reverse } },
+    { "Feedback", { params::id::feedback, params::id::fbHighpass, params::id::fbLowpass,
+                    params::id::fbResonance, params::id::shimmerInterval,
+                    params::id::shimmerAmount, params::id::shimmerFine,
+                    params::id::diffuse, params::id::satType, params::id::drive } },
+    { "Output",   { params::id::mix, params::id::output, params::id::fallbackBpm } },
 };
 
 constexpr int kKnobW = 84, kKnobH = 96, kLabelH = 16, kHeaderH = 22, kPad = 8;
@@ -16,8 +26,8 @@ SillageAudioProcessorEditor::SillageAudioProcessorEditor (SillageAudioProcessor&
     buildSections();
 
     setResizable (true, true);
-    setResizeLimits (420, 240, 2400, 1600);
-    setSize (640, 320);
+    setResizeLimits (520, 360, 2400, 1600);
+    setSize (900, 620);
 }
 
 void SillageAudioProcessorEditor::buildSections()
@@ -32,19 +42,29 @@ void SillageAudioProcessorEditor::buildSections()
             auto* param = processor.apvts.getParameter (paramId);
             jassert (param != nullptr);
 
-            Control c;
-            c.label = std::make_unique<juce::Label> (juce::String(), param->getName (32));
-            c.label->setJustificationType (juce::Justification::centred);
-            c.label->setFont (juce::FontOptions (12.0f));
-            addAndMakeVisible (*c.label);
+            Control control;
+            control.label = std::make_unique<juce::Label> (juce::String(), param->getName (32));
+            control.label->setJustificationType (juce::Justification::centred);
+            control.label->setFont (juce::FontOptions (12.0f));
+            addAndMakeVisible (*control.label);
 
             if (dynamic_cast<juce::AudioParameterChoice*> (param) != nullptr)
             {
                 auto box = std::make_unique<juce::ComboBox>();
                 addAndMakeVisible (*box);
-                c.comboAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+                control.kind = Kind::combo;
+                control.comboAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
                     processor.apvts, paramId, *box);
-                c.comp = std::move (box);
+                control.comp = std::move (box);
+            }
+            else if (dynamic_cast<juce::AudioParameterBool*> (param) != nullptr)
+            {
+                auto button = std::make_unique<juce::ToggleButton>();
+                addAndMakeVisible (*button);
+                control.kind = Kind::toggle;
+                control.buttonAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+                    processor.apvts, paramId, *button);
+                control.comp = std::move (button);
             }
             else
             {
@@ -52,12 +72,13 @@ void SillageAudioProcessorEditor::buildSections()
                     juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow);
                 slider->setTextBoxStyle (juce::Slider::TextBoxBelow, false, kKnobW - 8, 16);
                 addAndMakeVisible (*slider);
-                c.sliderAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+                control.kind = Kind::knob;
+                control.sliderAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
                     processor.apvts, paramId, *slider);
-                c.comp = std::move (slider);
+                control.comp = std::move (slider);
             }
 
-            section.controls.push_back (std::move (c));
+            section.controls.push_back (std::move (control));
         }
 
         sections.push_back (std::move (section));
@@ -71,42 +92,49 @@ void SillageAudioProcessorEditor::paint (juce::Graphics& g)
     g.setColour (juce::Colours::white.withAlpha (0.7f));
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
 
-    // Section headers are painted where resized() left room for them.
-    int y = kPad;
-    const int perRow = juce::jmax (1, (getWidth() - kPad * 2) / kKnobW);
-
     for (const auto& section : sections)
-    {
-        g.drawText (section.name, kPad, y, getWidth() - kPad * 2, kHeaderH,
+        g.drawText (section.name, kPad, section.headerY, getWidth() - kPad * 2, kHeaderH,
                     juce::Justification::centredLeft);
-        const int rows = ((int) section.controls.size() + perRow - 1) / perRow;
-        y += kHeaderH + rows * (kKnobH + kLabelH) + kPad;
-    }
 }
 
 void SillageAudioProcessorEditor::resized()
 {
-    const int perRow = juce::jmax (1, (getWidth() - kPad * 2) / kKnobW);
+    const auto perRow = juce::jmax (1, (getWidth() - kPad * 2) / kKnobW);
     int y = kPad;
 
     for (auto& section : sections)
     {
+        section.headerY = y;
         y += kHeaderH;
-        int i = 0;
+
+        int index = 0;
         for (auto& control : section.controls)
         {
-            const int col = i % perRow, row = i / perRow;
-            const int x  = kPad + col * kKnobW;
-            const int cy = y + row * (kKnobH + kLabelH);
+            const auto column = index % perRow;
+            const auto row    = index / perRow;
+            const auto x      = kPad + column * kKnobW;
+            const auto top    = y + row * (kKnobH + kLabelH);
 
-            control.label->setBounds (x, cy, kKnobW, kLabelH);
-            if (dynamic_cast<juce::ComboBox*> (control.comp.get()) != nullptr)
-                control.comp->setBounds (x + 2, cy + kLabelH + (kKnobH - 24) / 2, kKnobW - 4, 24);
-            else
-                control.comp->setBounds (x, cy + kLabelH, kKnobW, kKnobH);
-            ++i;
+            control.label->setBounds (x, top, kKnobW, kLabelH);
+
+            switch (control.kind)
+            {
+                case Kind::combo:
+                    control.comp->setBounds (x + 2, top + kLabelH + (kKnobH - 24) / 2, kKnobW - 4, 24);
+                    break;
+                case Kind::toggle:
+                    control.comp->setBounds (x + kKnobW / 2 - 12, top + kLabelH + (kKnobH - 24) / 2, 24, 24);
+                    break;
+                case Kind::knob:
+                default:
+                    control.comp->setBounds (x, top + kLabelH, kKnobW, kKnobH);
+                    break;
+            }
+
+            ++index;
         }
-        const int rows = ((int) section.controls.size() + perRow - 1) / perRow;
+
+        const auto rows = ((int) section.controls.size() + perRow - 1) / perRow;
         y += rows * (kKnobH + kLabelH) + kPad;
     }
 }
