@@ -39,6 +39,7 @@ set(SILLAGE_SOURCES
     src/FeedbackPath.cpp
     src/GrainEngine.cpp
     src/LifetimeCurves.cpp
+    src/MainPage.cpp
     src/ModPanel.cpp
     src/Modulation.cpp
     src/Modulators.cpp
@@ -47,6 +48,8 @@ set(SILLAGE_SOURCES
     src/PluginProcessor.cpp
     src/PluginEditor.cpp
     src/Randomize.cpp
+    src/SectionPage.cpp
+    src/Types.cpp
     src/Wake.cpp)
 
 target_sources(Sillage PRIVATE ${SILLAGE_SOURCES})
@@ -87,3 +90,25 @@ target_link_libraries(SillageTests PRIVATE
     juce::juce_recommended_warning_flags)
 
 add_test(NAME SillageTests COMMAND SillageTests)
+
+# ---- UI snapshot tool (development only) ------------------------------------
+# Renders every page of the editor to PNG without a host, so a layout change can
+# be looked at: run it under xvfb-run on a headless machine.
+option(SILLAGE_BUILD_SNAPSHOT_TOOL "Build the editor snapshot tool" OFF)
+if(SILLAGE_BUILD_SNAPSHOT_TOOL)
+    juce_add_console_app(SillageSnapshot PRODUCT_NAME "SillageSnapshot")
+    target_sources(SillageSnapshot PRIVATE
+        tools/Snapshot.cpp
+        ${SILLAGE_SOURCES})
+    target_include_directories(SillageSnapshot PRIVATE src)
+    target_compile_definitions(SillageSnapshot PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_MODAL_LOOPS_PERMITTED=0
+        JUCE_STANDALONE_APPLICATION=1)
+    target_link_libraries(SillageSnapshot PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+endif()

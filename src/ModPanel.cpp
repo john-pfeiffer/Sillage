@@ -11,6 +11,13 @@ ModPanel::ModPanel (SillageAudioProcessor& p)
 {
     const auto font = juce::FontOptions (12.0f);
 
+    // Attachments sync the selection; the items come from the parameter.
+    const auto fill = [this] (juce::ComboBox& box, const char* id)
+    {
+        if (auto* choice = dynamic_cast<juce::AudioParameterChoice*> (processor.apvts.getParameter (id)))
+            box.addItemList (choice->choices, 1);
+    };
+
     for (size_t s = 0; s < slots.size(); ++s)
     {
         auto& slot = slots[s];
@@ -20,6 +27,9 @@ ModPanel::ModPanel (SillageAudioProcessor& p)
         slot.number.setFont (font);
         addAndMakeVisible (slot.number);
 
+        fill (slot.source, params::id::modSource[s]);
+        fill (slot.destination, params::id::modDestination[s]);
+        fill (slot.curve, params::id::modCurve[s]);
         addAndMakeVisible (slot.source);
         addAndMakeVisible (slot.destination);
         addAndMakeVisible (slot.curve);
@@ -41,6 +51,8 @@ ModPanel::ModPanel (SillageAudioProcessor& p)
         lfo.name.setFont (font);
         addAndMakeVisible (lfo.name);
 
+        fill (lfo.shape, params::id::lfoShape[l]);
+        fill (lfo.division, params::id::lfoDivision[l]);
         addAndMakeVisible (lfo.shape);
         addAndMakeVisible (lfo.division);
         addAndMakeVisible (lfo.sync);
