@@ -15,12 +15,12 @@ class SillageAudioProcessor;
 namespace types
 {
 
-enum class Type { delay = 0, reverb, shimmer, wash, granular, count };
+enum class Type { delay = 0, room, reverb, shimmer, wash, granular, count };
 
 inline constexpr int kNumTypes = (int) Type::count;
 
 inline constexpr std::array<const char*, kNumTypes> kTypeNames {
-    "Delay", "Reverb", "Shimmer", "Wash", "Granular"
+    "Delay", "Room", "Reverb", "Shimmer", "Wash", "Granular"
 };
 
 // Message thread only.

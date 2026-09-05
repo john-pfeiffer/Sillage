@@ -61,6 +61,7 @@ void configureAsPlainDelay (SillageAudioProcessor& p)
     setParam (p, params::id::mix, 100.0f);
     setParam (p, params::id::output, 0.0f);
     setParam (p, params::id::feedback, 0.0f);
+    setParam (p, params::id::decay, params::kDecayOffMs); // Feedback alone decides
     setParam (p, params::id::spread, 0.0f);
     setParam (p, params::id::density, 40.0f);
     setParam (p, params::id::size, 80.0f);
@@ -99,6 +100,9 @@ void configureAsPlainDelay (SillageAudioProcessor& p)
     setParam (p, params::id::width, 100.0f);
     setParam (p, params::id::wetHighpass, 20.0f);
     setParam (p, params::id::wetLowpass, 20000.0f);
+    for (auto* id : { params::id::loopOn, params::id::transientsOn, params::id::ageOn,
+                      params::id::chaosOn, params::id::modOn })
+        setParam (p, id, 1.0f);
 }
 
 // Installs a two-point straight line for one Lifetime Curve destination and
@@ -699,7 +703,11 @@ void testRandomizeCoversEverythingExceptTheExclusions()
         }
     }
 
-    check (exclusionsHeld, "randomize never touches Mix, Output, Freeze, Wake, Panic, Fallback BPM or itself");
+    check (exclusionsHeld, "randomize never touches Mix, Output, Freeze, Wake, Panic, Fallback BPM, the stage switches or itself");
+    check (randomize::isExcluded (params::id::loopOn) && randomize::isExcluded (params::id::transientsOn)
+               && randomize::isExcluded (params::id::ageOn) && randomize::isExcluded (params::id::chaosOn)
+               && randomize::isExcluded (params::id::modOn) && ! randomize::isExcluded (params::id::decay),
+           "the five stage switches are excluded; Decay is not");
     check (randomize::isExcluded (params::id::wakeMode) && ! randomize::isExcluded (params::id::modSource[0])
                && ! randomize::isExcluded (params::id::displace),
            "Wake mode is excluded; mod slots and Displace are not");
@@ -1733,7 +1741,9 @@ void testTypesGiveUsableStartingPoints()
         Audio out;
         render (*p, 3.0, toneThenSilence (220.0, 1.0), out);
         check (allFinite (out) && peakSeconds (out, 0.0, 3.0) < 8.0f, (name + ": renders finite, bounded audio").toRawUTF8());
-        check (peakSeconds (out, 1.2, 3.0) > 1.0e-3f, (name + ": a tone leaves a tail behind").toRawUTF8());
+        // Room is over within its 250 ms Decay; the others get the full window.
+        const auto tailEnd = type == types::Type::room ? 1.4 : 3.0;
+        check (peakSeconds (out, 1.02, tailEnd) > 1.0e-3f, (name + ": a tone leaves a tail behind").toRawUTF8());
     }
 
     auto delay = makeProcessor();
@@ -1743,6 +1753,196 @@ void testTypesGiveUsableStartingPoints()
     auto reverb = makeProcessor();
     types::apply (*reverb, types::Type::reverb);
     check (getParam (*reverb, params::id::spread) > 99.5f, "the Reverb type sits at Spread 100");
+}
+
+// ---- Decay and the stage switches -----------------------------------------------
+
+// Decay is an RT60 on the audio's age: whatever Feedback says, a tail ends at
+// Decay. At Off, Feedback alone decides (the behaviour every test above relies on).
+void testDecayEndsTheTail()
+{
+    const auto tailAt = [] (float decayMs)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 95.0f);
+        setParam (*p, params::id::decay, decayMs);
+
+        Audio out;
+        render (*p, 1.5, toneThenSilence (220.0, 0.3), out);
+        return peakSeconds (out, 1.0, 1.5);
+    };
+
+    check (tailAt (params::kDecayOffMs) > 1.0e-2f, "Decay Off: a 95 % tail is still loud at 1 s");
+    check (tailAt (300.0f) < 1.0e-3f, "Decay 300 ms ends the same tail well before 1 s");
+    check (params::decayIsOff (params::kDecayOffMs) && ! params::decayIsOff (29000.0f),
+           "only the top of the Decay range reads Off");
+}
+
+// Decay also bounds how far back Spread may read, so a short Decay at Spread
+// 100 is a room around the last few hundred milliseconds, not a smear across
+// the whole buffer. That is what makes the delay-to-reverb slider continuous.
+void testDecayLimitsSpreadReach()
+{
+    const auto oldAudioAt = [] (float decayMs)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 50.0f);
+        setParam (*p, params::id::spread, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::decay, decayMs);
+
+        Audio out;
+        render (*p, 2.5, toneThenSilence (220.0, 0.5), out);
+        return peakSeconds (out, 1.5, 2.5);
+    };
+
+    check (oldAudioAt (params::kDecayOffMs) > 1.0e-3f, "Decay Off: Spread 100 keeps playing the tone a second later");
+    check (oldAudioAt (200.0f) < 1.0e-4f, "Decay 200 ms: Spread 100 no longer reaches audio that old");
+}
+
+// The Room type: 100 %-wet drums keep their hit and the room is gone within
+// half a second.
+void testRoomKeepsTheHit()
+{
+    auto p = makeProcessor();
+    types::apply (*p, types::Type::room);
+    setParam (*p, params::id::mix, 100.0f);
+
+    // A 20 ms burst at 0.5 s: a drum hit, not a single sample, so 15 ms grains
+    // have something to land on.
+    Audio out;
+    render (*p, 2.0, [] (int64_t i, int)
+    {
+        const auto t = (double) i / kSampleRate;
+        return t >= 0.5 && t < 0.52 ? sine (i, 1000.0) : 0.0f;
+    }, out);
+
+    const auto hit  = peakSeconds (out, 0.5, 0.75);
+    const auto room = peakSeconds (out, 0.55, 0.8);
+    const auto gone = peakSeconds (out, 1.0, 2.0);
+    std::printf ("       room: hit %.4f  tail %.4f  at 1 s %.6f\n", hit, room, gone);
+
+    check (allFinite (out), "Room renders finite audio");
+    check (hit > 0.02f, "Room: the hit comes straight through the wet path");
+    check (room > 1.0e-4f, "Room: a short tail follows the hit");
+    check (gone < hit * 0.01f, "Room: the tail is gone half a second later");
+}
+
+// Each stage switch turns its whole stage off: the stage's knobs may say
+// anything and the render behaves as if they were neutral.
+void testStageSwitchesSilenceTheirStage()
+{
+    // Transients off: a Choke that is on does not fire.
+    {
+        const auto tailAfterHit = [] (bool transientsOn)
+        {
+            auto p = makeProcessor();
+            configureAsPlainDelay (*p);
+            setParam (*p, params::id::time, 100.0f);
+            setParam (*p, params::id::density, 60.0f);
+            setParam (*p, params::id::feedback, 95.0f);
+            setParam (*p, params::id::chokeOn, 1.0f);
+            setParam (*p, params::id::chokeAmount, 100.0f);
+            setParam (*p, params::id::chokeFade, 20.0f);
+            setParam (*p, params::id::transientsOn, transientsOn ? 1.0f : 0.0f);
+
+            Audio out;
+            render (*p, 2.6, [] (int64_t i, int)
+            {
+                const auto t = (double) i / kSampleRate;
+                if (t < 0.5)                       return sine (i, 220.0) * 0.5f;
+                if (i == (int64_t) atSecond (2.0)) return 0.05f;
+                return 0.0f;
+            }, out);
+            return std::make_pair (peakSeconds (out, 1.8, 2.0), peakSeconds (out, 2.1, 2.6));
+        };
+
+        const auto [beforeOn,  afterOn]  = tailAfterHit (true);
+        const auto [beforeOff, afterOff] = tailAfterHit (false);
+        check (beforeOn > 1.0e-3f && afterOn < beforeOn * 0.3f, "Transients on: the choke fires");
+        check (afterOff > beforeOff * 0.5f, "Transients off: the same choke leaves the tail alone");
+    }
+
+    // Loop off: a full shimmer does not climb.
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 200.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::size, 100.0f);
+        setParam (*p, params::id::feedback, 80.0f);
+        setParam (*p, params::id::shimmerInterval, 6.0f);
+        setParam (*p, params::id::shimmerAmount, 100.0f);
+        setParam (*p, params::id::loopOn, 0.0f);
+
+        Audio out;
+        render (*p, 1.5, toneThenSilence (220.0, 0.3), out);
+        const auto early = dominantFrequency (out[0], atSecond (0.40), atSecond (0.65));
+        const auto later = dominantFrequency (out[0], atSecond (0.80), atSecond (1.05));
+        check (early > 180.0 && early < 260.0 && std::abs (later - early) < early * 0.1,
+               "Loop off: a +12 shimmer at 100 % leaves the pitch where it was");
+    }
+
+    // Age off: a Level curve to zero does not end the tail.
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 100.0f);
+        setParam (*p, params::id::density, 60.0f);
+        setParam (*p, params::id::feedback, 95.0f);
+        setParam (*p, params::id::lifetime, 1000.0f);
+        setLine (*p, lifetime::Destination::level, 1.0f, 0.0f, true);
+        setParam (*p, params::id::ageOn, 0.0f);
+
+        Audio out;
+        render (*p, 3.0, toneThenSilence (220.0, 0.3), out);
+        check (peakSeconds (out, 2.0, 3.0) > 1.0e-2f, "Age off: an enabled Level curve to zero is ignored");
+    }
+
+    // Mod off: an LFO on Mix leaves the dry level alone.
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 3000.0f);
+        setParam (*p, params::id::mix, 50.0f);
+        setParam (*p, params::id::modSource[0], (float) mod::Source::lfo1);
+        setParam (*p, params::id::modDestination[0], (float) mod::Destination::mix);
+        setParam (*p, params::id::modAmount[0], 100.0f);
+        setParam (*p, params::id::lfoRate[0], 2.0f);
+        setParam (*p, params::id::modOn, 0.0f);
+
+        Audio out;
+        render (*p, 1.2, [] (int64_t i, int) { return sine (i, 1000.0) * 0.5f; }, out);
+        const auto a = peakSeconds (out, 0.23, 0.27), b = peakSeconds (out, 0.48, 0.52);
+        check (a > 0.25f && b > 0.25f && std::abs (a - b) < 0.05f, "Mod off: an LFO on Mix does nothing");
+    }
+
+    // Chaos off: Chaos 100 renders exactly like Chaos 0.
+    {
+        const auto renderWith = [] (float chaos, bool chaosOn, Audio& out)
+        {
+            auto p = makeProcessor();
+            configureAsPlainDelay (*p);
+            setParam (*p, params::id::time, 250.0f);
+            setParam (*p, params::id::chaos, chaos);
+            setParam (*p, params::id::chaosOn, chaosOn ? 1.0f : 0.0f);
+            render (*p, 2.0, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out);
+        };
+
+        Audio calm, muted;
+        renderWith (0.0f, true, calm);
+        renderWith (100.0f, false, muted);
+
+        float difference = 0.0f;
+        for (size_t i = 0; i < calm[0].size(); ++i)
+            difference = std::max (difference, std::abs (calm[0][i] - muted[0][i]));
+        check (rms (calm[0], atSecond (1.0), atSecond (2.0)) > 0.01 && difference < 1.0e-4f,
+               "Chaos off: Chaos 100 renders like Chaos 0");
+    }
 }
 
 int main()
@@ -1808,6 +2008,11 @@ int main()
     testPresetFileRoundTrip();
 
     testTypesGiveUsableStartingPoints();
+
+    testDecayEndsTheTail();
+    testDecayLimitsSpreadReach();
+    testRoomKeepsTheHit();
+    testStageSwitchesSilenceTheirStage();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

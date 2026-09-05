@@ -2,10 +2,15 @@
 // layout change can be looked at on a machine with no DAW — headless under
 // xvfb-run. Build with -DSILLAGE_BUILD_SNAPSHOT_TOOL=ON.
 //
-//   SillageSnapshot [output-dir]
+//   SillageSnapshot [output-dir] [--off]
+//
+// With --off every stage switch is turned off first, so the greyed-out state
+// of each tab can be checked too.
 
 #include <cstdio>
+#include <cstring>
 
+#include "Parameters.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
@@ -13,13 +18,26 @@ int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    const auto outDir = argc > 1 ? juce::File::getCurrentWorkingDirectory().getChildFile (argv[1])
-                                 : juce::File::getCurrentWorkingDirectory();
+    auto outDir = juce::File::getCurrentWorkingDirectory();
+    bool stagesOff = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp (argv[i], "--off") == 0)
+            stagesOff = true;
+        else
+            outDir = juce::File::getCurrentWorkingDirectory().getChildFile (argv[i]);
+    }
     outDir.createDirectory();
 
     SillageAudioProcessor processor;
     processor.setPlayConfigDetails (2, 2, 48000.0, 512);
     processor.prepareToPlay (48000.0, 512);
+
+    if (stagesOff)
+        for (auto* id : { params::id::loopOn, params::id::transientsOn, params::id::ageOn,
+                          params::id::rewindOn, params::id::chaosOn, params::id::modOn, params::id::timeSync })
+            if (auto* param = processor.apvts.getParameter (id))
+                param->setValueNotifyingHost (0.0f);
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
     auto* sillage = dynamic_cast<SillageAudioProcessorEditor*> (editor.get());
@@ -38,7 +56,8 @@ int main (int argc, char** argv)
         auto image = editor->createComponentSnapshot (editor->getLocalBounds(), false, 1.0f);
 
         auto name = panel.getTabName (tab).toLowerCase().replaceCharacters (" &", "--").removeCharacters ("-");
-        auto file = outDir.getChildFile ("snapshot-" + juce::String (tab) + "-" + name + ".png");
+        auto file = outDir.getChildFile ("snapshot-" + juce::String (tab) + "-" + name
+                                         + (stagesOff ? "-off" : "") + ".png");
         file.deleteFile();
 
         juce::FileOutputStream stream (file);

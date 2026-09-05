@@ -11,8 +11,9 @@ struct KnobSpec
 
 // Left to right. Damping is the loop LP under its reverb name; Shimmer is the
 // shimmer amount (the interval sits on the Feedback tab, +12 by default).
-const std::array<KnobSpec, 8> kKnobs { {
+const std::array<KnobSpec, MainPage::kNumKnobs> kKnobs { {
     { params::id::time,          "Time",     "ms, or a division with Sync" },
+    { params::id::decay,         "Decay",    "tail length \xc2\xb7 Off = no limit" },
     { params::id::spread,        "Spread",   "delay \xe2\x86\x90 \xe2\x86\x92 reverb" },
     { params::id::feedback,      "Feedback", "over 100 % is safe" },
     { params::id::size,          "Size",     "grain length" },
@@ -42,7 +43,7 @@ MainPage::MainPage (SillageAudioProcessor& p)
         knob.subtitle.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.55f));
         addAndMakeVisible (knob.subtitle);
 
-        knob.knob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, kKnobSize - 20, 18);
+        knob.knob.setTextBoxStyle (juce::Slider::TextBoxBelow, false, kKnobSize - 14, 18);
         addAndMakeVisible (knob.knob);
         knob.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
             processor.apvts, spec.id, knob.knob);
@@ -56,13 +57,33 @@ MainPage::MainPage (SillageAudioProcessor& p)
         processor.apvts, params::id::timeSync, syncToggle);
     divisionAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor.apvts, params::id::timeDivision, division);
+
+    timerCallback();
+    startTimerHz (15);
+}
+
+MainPage::~MainPage()
+{
+    stopTimer();
+}
+
+void MainPage::timerCallback()
+{
+    // The division only means something while Sync is on.
+    const auto synced = processor.apvts.getRawParameterValue (params::id::timeSync)->load() >= 0.5f;
+    if (synced != divisionEnabled)
+    {
+        divisionEnabled = synced;
+        division.setEnabled (synced);
+        division.setAlpha (synced ? 1.0f : 0.35f);
+    }
 }
 
 void MainPage::paint (juce::Graphics&) {}
 
 void MainPage::resized()
 {
-    // Eight columns spread across the width, knobs centred in each, and the
+    // Nine columns spread across the width, knobs centred in each, and the
     // row centred in whatever height the tallest tab gave us.
     const auto columnW  = (getWidth() - kPad * 2) / (int) knobs.size();
     const auto contentH = kTitleH + kSubtitleH + kKnobSize + kPad + kSyncRowH;
@@ -82,6 +103,6 @@ void MainPage::resized()
     // Sync toggle and division under the Time knob.
     const auto syncTop = top + kTitleH + kSubtitleH + kKnobSize + kPad;
     const auto timeX   = kPad + columnW / 2;
-    syncToggle.setBounds (timeX - kKnobSize / 2, syncTop, 54, kSyncRowH);
-    division.setBounds (timeX - kKnobSize / 2 + 56, syncTop + 1, kKnobSize - 56, kSyncRowH - 2);
+    syncToggle.setBounds (timeX - kKnobSize / 2, syncTop, 50, kSyncRowH);
+    division.setBounds (timeX - kKnobSize / 2 + 52, syncTop + 1, kKnobSize - 52, kSyncRowH - 2);
 }

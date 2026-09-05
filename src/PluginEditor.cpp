@@ -12,8 +12,8 @@ constexpr int kTimerHz = 30;
 constexpr int kMinWindowW = 640, kMaxWindowW = 2560;
 
 // One tab per group of sections. Parameters shown on the Main page or in the
-// top bar (Time + Sync, Spread, Feedback, Size, Loop LP, Shimmer Amt, Width,
-// Mix, Freeze, Wake) are not repeated here, so nothing has two controls.
+// top bar (Time + Sync, Decay, Spread, Feedback, Size, Loop LP, Shimmer Amt,
+// Width, Mix, Freeze, Wake) are not repeated here, so nothing has two controls.
 struct TabSpec
 {
     const char* name;
@@ -87,33 +87,47 @@ void SillagePanel::buildPages()
     mainPage = new MainPage (processor);
     tabs.addTab ("Main", background, mainPage, true);
 
+    // Each stage tab leads with its On switch (the section gate) and marks the
+    // knob that turns the rest on (the master), so a dead stage looks dead.
     const std::vector<TabSpec> specs = {
         { "Grain", {
             { "Grain", { id::density, id::window } },
             { "Pitch", { id::pitch, id::pitchFine, id::pitchSpread, id::quantize, id::quantizeRoot,
                          id::panSpread, id::reverse } } } },
         { "Feedback", {
-            { "Loop", { id::fbHighpass, id::fbResonance, id::shimmerInterval, id::shimmerFine,
-                        id::diffuse, id::satType, id::drive } },
-            { "Sync", { id::sync, id::grainDivision, id::swing } } } },
+            { "Loop", { id::loopOn, id::diffuse, id::drive, { id::satType, id::drive },
+                        id::fbHighpass, id::fbResonance,
+                        { id::shimmerInterval, id::shimmerAmount }, { id::shimmerFine, id::shimmerAmount } },
+              nullptr, 0, 0, id::loopOn },
+            { "Sync", { id::sync, { id::grainDivision, id::sync }, { id::swing, id::sync } } } } },
         { "Transients", {
-            { "Transients", { id::sensitivity,
-                              id::retriggerOn, id::retriggerCount, id::retriggerRate, id::retriggerDivision,
-                              id::retriggerAmount, id::retriggerOffset,
-                              id::duckOn, id::duckDepth, id::duckAttack, id::duckRelease,
-                              id::chokeOn, id::chokeAmount, id::chokeFade,
-                              id::envDensity, id::envSpread } },
-            { "Wake", { id::displace } } } },
+            { "Transients", { id::transientsOn, id::sensitivity }, nullptr, 0, 0, id::transientsOn },
+            { "Retrigger", { id::retriggerOn,
+                             { id::retriggerCount, id::retriggerOn }, { id::retriggerRate, id::retriggerOn },
+                             { id::retriggerDivision, id::retriggerOn }, { id::retriggerAmount, id::retriggerOn },
+                             { id::retriggerOffset, id::retriggerOn } },
+              nullptr, 0, 0, id::transientsOn },
+            { "Duck", { id::duckOn, { id::duckDepth, id::duckOn }, { id::duckAttack, id::duckOn },
+                        { id::duckRelease, id::duckOn } },
+              nullptr, 0, 0, id::transientsOn },
+            { "Choke", { id::chokeOn, { id::chokeAmount, id::chokeOn }, { id::chokeFade, id::chokeOn } },
+              nullptr, 0, 0, id::transientsOn },
+            { "Envelope", { id::envDensity, id::envSpread }, nullptr, 0, 0, id::transientsOn },
+            { "Wake", { id::displace }, nullptr, 0, 0, id::transientsOn } } },
         { "Age", {
-            { "Age", { id::lifetime, id::degradeBits, id::degradeRate, id::degradeNoise, id::degradeTilt,
-                       id::degradeDrift, id::degradeDriftDir },
-              &curveEditor, kCurveEditorMinW, kCurveEditorH } } },
+            { "Age", { id::ageOn, id::lifetime, id::degradeBits, id::degradeRate, id::degradeNoise,
+                       id::degradeTilt, id::degradeDrift, { id::degradeDriftDir, id::degradeDrift } },
+              &curveEditor, kCurveEditorMinW, kCurveEditorH, id::ageOn } } },
         { "Rewind & Chaos", {
-            { "Rewind", { id::rewindOn, id::rewindLength, id::rewindTrigger, id::rewindInterval,
-                          id::rewindDivision, id::rewindThreshold, id::rewindLevel, id::rewindPitch } },
-            { "Freeze & Chaos", { id::freezeFade, id::chaos, id::randomizeAmount } } } },
+            { "Rewind", { id::rewindOn, { id::rewindLength, id::rewindOn }, { id::rewindTrigger, id::rewindOn },
+                          { id::rewindInterval, id::rewindOn }, { id::rewindDivision, id::rewindOn },
+                          { id::rewindThreshold, id::rewindOn }, { id::rewindLevel, id::rewindOn },
+                          { id::rewindPitch, id::rewindOn } },
+              nullptr, 0, 0, id::rewindOn },
+            { "Chaos", { id::chaosOn, { id::chaos, id::chaosOn } }, nullptr, 0, 0, id::chaosOn },
+            { "Freeze & Randomize", { id::freezeFade, id::randomizeAmount } } } },
         { "Mod", {
-            { "Modulation", {}, &modPanel, ModPanel::kMinWidth, ModPanel::requiredHeight() } } },
+            { "Modulation", { id::modOn }, &modPanel, ModPanel::kMinWidth, ModPanel::requiredHeight(), id::modOn } } },
         { "Output", {
             { "Output", { id::output, id::wetHighpass, id::wetLowpass, id::fallbackBpm } } } },
     };

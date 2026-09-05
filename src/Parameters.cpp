@@ -77,7 +77,22 @@ auto label (const char* text)
         {
             return unit.isEmpty() ? formatValue (value) : formatValue (value) + " " + unit;
         })
-        .withValueFromStringFunction ([] (const juce::String& text) { return text.trim().getFloatValue(); });
+        .withValueFromStringFunction ([] (const juce::String& typed) { return typed.trim().getFloatValue(); });
+}
+
+// Decay reads "Off" at the top of its range.
+auto decayLabel()
+{
+    return juce::AudioParameterFloatAttributes()
+        .withLabel ("ms")
+        .withStringFromValueFunction ([] (float value, int)
+        {
+            return decayIsOff (value) ? juce::String ("Off") : formatValue (value) + " ms";
+        })
+        .withValueFromStringFunction ([] (const juce::String& typed)
+        {
+            return typed.trim().equalsIgnoreCase ("off") ? kDecayOffMs : typed.trim().getFloatValue();
+        });
 }
 
 template <typename... Args>
@@ -115,6 +130,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // Above 100 % is intentional and safe only because of the loop limiter.
     layout.add (makeFloat (id::feedback, "Feedback",
                            juce::NormalisableRange<float> (0.0f, 120.0f), 45.0f, label ("%")));
+
+    // Decay: 50 ms .. 30 s, the top reading "Off".
+    layout.add (makeFloat (id::decay, "Decay", skewed (50.0f, kDecayOffMs, 1500.0f), 2000.0f, decayLabel()));
+
+    // Stage switches.
+    layout.add (makeBool (id::loopOn, "Loop On", true));
+    layout.add (makeBool (id::transientsOn, "Transients On", true));
+    layout.add (makeBool (id::ageOn, "Age On", true));
+    layout.add (makeBool (id::chaosOn, "Chaos On", true));
+    layout.add (makeBool (id::modOn, "Mod On", true));
 
     // ---- Per-grain pitch & placement (5.1) ----------------------------------
     layout.add (makeFloat (id::pitch, "Pitch",
