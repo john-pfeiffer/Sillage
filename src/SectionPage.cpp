@@ -1,5 +1,11 @@
 #include "SectionPage.h"
 
+namespace
+{
+constexpr int   kTimerHz      = 15;
+constexpr float kDisabledAlpha = 0.35f;
+} // namespace
+
 SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> specs)
     : processor (p)
 {
@@ -10,17 +16,20 @@ SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> spe
         section.extra         = spec.extra;
         section.extraMinWidth = spec.extraMinWidth;
         section.extraHeight   = spec.extraHeight;
+        section.gate          = spec.gate;
 
         if (section.extra != nullptr)
             addAndMakeVisible (*section.extra);
 
-        for (auto* paramId : spec.ids)
+        for (const auto& controlSpec : spec.controls)
         {
-            auto* param = processor.apvts.getParameter (paramId);
+            auto* param = processor.apvts.getParameter (controlSpec.id);
             jassert (param != nullptr);
 
             Control control;
-            control.label = std::make_unique<juce::Label> (juce::String(), param->getName (32));
+            control.id     = controlSpec.id;
+            control.master = controlSpec.master;
+            control.label  = std::make_unique<juce::Label> (juce::String(), param->getName (32));
             control.label->setJustificationType (juce::Justification::centred);
             control.label->setFont (juce::FontOptions (12.0f));
             addAndMakeVisible (*control.label);
@@ -32,7 +41,7 @@ SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> spe
                 addAndMakeVisible (*box);
                 control.kind = Kind::combo;
                 control.comboAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
-                    processor.apvts, paramId, *box);
+                    processor.apvts, controlSpec.id, *box);
                 control.comp = std::move (box);
             }
             else if (dynamic_cast<juce::AudioParameterBool*> (param) != nullptr)
@@ -41,7 +50,7 @@ SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> spe
                 addAndMakeVisible (*button);
                 control.kind = Kind::toggle;
                 control.buttonAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
-                    processor.apvts, paramId, *button);
+                    processor.apvts, controlSpec.id, *button);
                 control.comp = std::move (button);
             }
             else
@@ -52,7 +61,7 @@ SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> spe
                 addAndMakeVisible (*slider);
                 control.kind = Kind::knob;
                 control.sliderAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-                    processor.apvts, paramId, *slider);
+                    processor.apvts, controlSpec.id, *slider);
                 control.comp = std::move (slider);
             }
 
@@ -60,6 +69,54 @@ SectionPage::SectionPage (SillageAudioProcessor& p, std::vector<SectionSpec> spe
         }
 
         sections.push_back (std::move (section));
+    }
+
+    refreshEnabled();
+    startTimerHz (kTimerHz);
+}
+
+SectionPage::~SectionPage()
+{
+    stopTimer();
+}
+
+bool SectionPage::isOn (const char* parameterId) const noexcept
+{
+    if (parameterId == nullptr)
+        return true;
+
+    auto* value = processor.apvts.getRawParameterValue (parameterId);
+    return value != nullptr && value->load() > 1.0e-6f;
+}
+
+// A control is live when its section's stage switch is on and its own master
+// (if any) is on or above zero. The switch itself never greys out.
+void SectionPage::refreshEnabled()
+{
+    for (auto& section : sections)
+    {
+        const auto gateOn = isOn (section.gate);
+
+        for (auto& control : section.controls)
+        {
+            const auto isGate  = section.gate != nullptr && std::strcmp (control.id, section.gate) == 0;
+            const auto enabled = isGate || (gateOn && isOn (control.master));
+
+            if (enabled != control.enabled)
+            {
+                control.enabled = enabled;
+                control.comp->setEnabled (enabled);
+                control.comp->setAlpha (enabled ? 1.0f : kDisabledAlpha);
+                control.label->setAlpha (enabled ? 1.0f : kDisabledAlpha);
+            }
+        }
+
+        if (section.extra != nullptr && gateOn != section.extraEnabled)
+        {
+            section.extraEnabled = gateOn;
+            section.extra->setEnabled (gateOn);
+            section.extra->setAlpha (gateOn ? 1.0f : kDisabledAlpha);
+        }
     }
 }
 
@@ -75,11 +132,13 @@ void SectionPage::resized()
 
 void SectionPage::paint (juce::Graphics& g)
 {
-    g.setColour (juce::Colours::white.withAlpha (0.7f));
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
 
     for (const auto& section : sections)
+    {
+        g.setColour (juce::Colours::white.withAlpha (isOn (section.gate) ? 0.7f : 0.3f));
         g.drawText (section.name, section.header, juce::Justification::centredLeft);
+    }
 }
 
 int SectionPage::layout (int width, bool apply)

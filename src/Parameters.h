@@ -101,6 +101,18 @@ namespace id
     inline constexpr auto rewindPitch     = "rewindPitch";
     inline constexpr auto rewindManual    = "rewindManual";
 
+    // Decay: how long anything may live in the tail, and how far back Spread
+    // reaches. The top of its range is "Off" (Feedback alone decides).
+    inline constexpr auto decay = "decay";
+
+    // Stage switches: each tab's stage contributes nothing while off, so a
+    // stage can be A/B'd while listening. Not randomised.
+    inline constexpr auto loopOn       = "loopOn";
+    inline constexpr auto transientsOn = "transientsOn";
+    inline constexpr auto ageOn        = "ageOn";
+    inline constexpr auto chaosOn      = "chaosOn";
+    inline constexpr auto modOn        = "modOn";
+
     // Wake (5.8)
     inline constexpr auto wakeMode = "wakeMode";
     inline constexpr auto displace = "displace";
@@ -202,6 +214,11 @@ inline double longDivisionSeconds (int index, double bpm, double barBeats) noexc
 }
 
 enum class RewindTrigger { timer = 0, transient, threshold, manual };
+
+// Decay values at or above this read "Off": the tail is bounded by Feedback
+// alone and Spread reaches the whole buffer, as before Decay existed.
+inline constexpr float kDecayOffMs = 30000.0f;
+inline bool decayIsOff (float decayMs) noexcept { return decayMs >= kDecayOffMs - 1.0f; }
 enum class WakeMode { shared = 0, isolated };
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout();

@@ -48,6 +48,7 @@ const char* destinationParameterId (Destination destination) noexcept
         case Destination::rewindLevel:   return id::rewindLevel;
         case Destination::displace:      return id::displace;
         case Destination::mix:           return id::mix;
+        case Destination::decay:         return id::decay;
         case Destination::none:
         case Destination::count:
         default:                         return nullptr;

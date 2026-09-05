@@ -89,6 +89,9 @@ private:
     // A destination's plain value with this block's modulation applied.
     float modulated (mod::Destination destination) const noexcept;
 
+    // Chaos amount 0..1, or 0 while the Chaos stage is switched off.
+    float chaosAmount() const noexcept;
+
     void parameterChanged (const juce::String& parameterId, float newValue) override;
 
     void ensureCurvesInState();

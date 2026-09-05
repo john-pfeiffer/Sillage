@@ -11,10 +11,12 @@ namespace randomize
 
 // Never randomised: the user's mix and level, a random Freeze is a bug not a
 // feature, Wake mode changes the entire behaviour so the user chooses it,
-// Panic and the manual Rewind trigger are momentary, the fallback tempo is a
-// host setting, and the amount knob itself is meta.
-inline constexpr std::array<const char*, 8> kExcluded {
-    "mix", "output", "freeze", "wakeMode", "panic", "fallbackBpm", "randomizeAmount", "rewindManual"
+// the stage switches are for listening not for rolling, Panic and the manual
+// Rewind trigger are momentary, the fallback tempo is a host setting, and the
+// amount knob itself is meta.
+inline constexpr std::array<const char*, 13> kExcluded {
+    "mix", "output", "freeze", "wakeMode", "panic", "fallbackBpm", "randomizeAmount", "rewindManual",
+    "loopOn", "transientsOn", "ageOn", "chaosOn", "modOn"
 };
 
 bool isExcluded (const juce::String& parameterId);

@@ -38,6 +38,7 @@ enum class Destination
     loopHighpass, loopLowpass, shimmerAmount, shimmerFine, diffuse, drive,
     degradeBits, degradeRate, degradeNoise, degradeTilt, degradeDrift,
     rewindLevel, displace, mix,
+    decay,
     count
 };
 
@@ -57,7 +58,7 @@ inline constexpr std::array<const char*, kNumDestinations> kDestinationNames {
     "Pitch", "Pitch Spread", "Pan Spread", "Reverse",
     "Loop HP", "Loop LP", "Shimmer Amt", "Shimmer Fine", "Diffuse", "Drive",
     "Bits/pass", "SR/pass", "Noise/pass", "LP tilt/pass", "Drift/pass",
-    "Rewind Level", "Displace", "Mix"
+    "Rewind Level", "Displace", "Mix", "Decay"
 };
 
 inline constexpr std::array<const char*, (size_t) Curve::count> kCurveNames { "Linear", "Exp", "Log" };

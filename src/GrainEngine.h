@@ -137,6 +137,10 @@ public:
         const lifetime::CurveSet* curves = nullptr;
         std::array<bool, lifetime::kNumDestinations> curveEnabled {};
 
+        // Decay: audio older than this fades to -60 dB and Spread reaches no
+        // further back than this (or Time, whichever is longer). <= 0 is Off.
+        double decaySeconds = 0.0;
+
         // Rewind (5.7).
         bool   rewindOn            = false;
         double rewindLengthSamples = 0.0;

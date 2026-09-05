@@ -105,6 +105,9 @@ constexpr double kRewindFadeSeconds = 0.02;
 
 // Samples of clearance kept between any read head and the write head.
 constexpr double kReadGuard = 8.0;
+
+// ln(1000): a level that falls by this exponent per Decay is -60 dB at Decay.
+constexpr double kRt60 = 6.907755;
 } // namespace
 
 // ---- RewindPlayer ------------------------------------------------------------
@@ -408,6 +411,12 @@ GrainEngine::GrainShape GrainEngine::resolveShape (const Settings& settings, flo
             shape.level = value (Destination::level);
     }
 
+    // Decay: the older the audio this grain plays, the quieter it is, and at
+    // Decay it is gone (-60 dB). Recirculated audio keeps its age, so this
+    // bounds the tail whatever Feedback says.
+    if (settings.decaySeconds > 0.0)
+        shape.level *= (float) std::exp (-kRt60 * (double) juce::jmax (0.0f, ageSeconds) / settings.decaySeconds);
+
     // Per-grain Age modulation (5.9): each slot adds amount * curve(age) in
     // the destination parameter's normalised range, on top of whatever the
     // curve or the knob resolved to.
@@ -557,10 +566,18 @@ void GrainEngine::spawnScheduledGrain (const Settings& settings)
     // Interpolating rather than clamping a random deviation is what keeps the
     // distribution smooth instead of piling grains up at the limits. Chaos
     // then pushes the result around on its own slow clock.
+    // Spread's random end reaches back as far as Decay (or Time, whichever is
+    // longer): a 200 ms Decay only ever reads the last 200 ms, so Spread runs
+    // from an echo at Time to a cloud filling the Decay window rather than a
+    // sparse smear across the whole buffer.
     const auto looseMin = kReadGuard;
     const auto looseMax = (double) capacity - kReadGuard;
+    const auto reach    = settings.decaySeconds > 0.0
+                        ? juce::jlimit (looseMin, looseMax,
+                                        juce::jmax (settings.timeSamples, settings.decaySeconds * sampleRate))
+                        : looseMax;
     const auto base         = juce::jlimit (looseMin, looseMax, settings.timeSamples);
-    const auto randomOffset = looseMin + rng.nextDouble() * (looseMax - looseMin);
+    const auto randomOffset = looseMin + rng.nextDouble() * (reach - looseMin);
     const auto probeOffset  = juce::jlimit (looseMin, looseMax,
                                             base + (double) settings.spread * (randomOffset - base)
                                                  + settings.timeModSamples);

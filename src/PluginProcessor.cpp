@@ -254,6 +254,11 @@ double SillageAudioProcessor::resolveTimeSeconds() const
 
 // ---- Modulation --------------------------------------------------------------
 
+float SillageAudioProcessor::chaosAmount() const noexcept
+{
+    return parameterValue (params::id::chaosOn) >= 0.5f ? parameterValue (params::id::chaos) * 0.01f : 0.0f;
+}
+
 float SillageAudioProcessor::modulated (mod::Destination destination) const noexcept
 {
     const auto* param = destinationParams[(size_t) destination];
@@ -307,6 +312,9 @@ void SillageAudioProcessor::updateModulation (int numSamples, float envelope, in
     modOffsets.fill (0.0f);
     numAgeMods = 0;
 
+    if (parameterValue (params::id::modOn) < 0.5f)
+        return; // the sources keep running so switching back on is seamless
+
     for (size_t s = 0; s < params::id::modSource.size(); ++s)
     {
         const auto source      = (mod::Source) juce::jlimit (0, mod::kNumSources - 1, (int) parameterValue (params::id::modSource[s]));
@@ -337,7 +345,8 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
 
     const auto bpm       = effectiveBpm.load();
     const auto bar       = barBeats.load();
-    const auto chaosAmt  = parameterValue (params::id::chaos) * 0.01f;
+    const auto chaosAmt  = chaosAmount();
+    const auto envelopes = parameterValue (params::id::transientsOn) >= 0.5f ? 1.0f : 0.0f;
     const auto bipolar   = envelope * 2.0f - 1.0f; // -1 quiet .. +1 loud
 
     settings.timeSamples    = resolveTimeSeconds() * currentSampleRate;
@@ -347,13 +356,17 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     // octave either way — positive means hits dense, sustains sparse.
     auto density = (double) modulated (mod::Destination::density);
     density *= 1.0 + (double) (chaosAmt * chaos.density * kChaosDensityRange);
-    if (const auto envDensity = parameterValue (params::id::envDensity) * 0.01f; std::abs (envDensity) > 1.0e-6f)
+    if (const auto envDensity = parameterValue (params::id::envDensity) * 0.01f * envelopes; std::abs (envDensity) > 1.0e-6f)
         density *= std::pow (2.0, (double) (envDensity * bipolar));
     settings.density = juce::jlimit (0.5, 500.0, density);
 
     auto spread = modulated (mod::Destination::spread) * 0.01f;
-    spread += parameterValue (params::id::envSpread) * 0.01f * bipolar * 0.5f;
+    spread += parameterValue (params::id::envSpread) * 0.01f * envelopes * bipolar * 0.5f;
     settings.spread = juce::jlimit (0.0f, 1.0f, spread);
+
+    // Decay: Off (the top of the range) leaves the tail to Feedback alone.
+    const auto decayMs = modulated (mod::Destination::decay);
+    settings.decaySeconds = params::decayIsOff (decayMs) ? 0.0 : (double) decayMs * 0.001;
 
     settings.sizeSamples = (double) modulated (mod::Destination::size) * 0.001 * currentSampleRate;
     settings.window      = (WindowShape) juce::jlimit (
@@ -382,11 +395,12 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
         (int) parameterValue (params::id::grainDivision), bpm, bar) * currentSampleRate;
     settings.swing = parameterValue (params::id::swing) * 0.01f;
 
-    // Age & Lifetime Curves (5.6).
+    // Age & Lifetime Curves (5.6); the Age stage switch takes the curves out.
+    const auto ageOn = parameterValue (params::id::ageOn) >= 0.5f;
     settings.lifetimeSeconds = juce::jmax (0.001, (double) parameterValue (params::id::lifetime) * 0.001);
-    settings.curves          = &activeCurves;
+    settings.curves          = ageOn ? &activeCurves : nullptr;
     for (size_t d = 0; d < params::id::curveEnable.size(); ++d)
-        settings.curveEnabled[d] = parameterValue (params::id::curveEnable[d]) >= 0.5f;
+        settings.curveEnabled[d] = ageOn && parameterValue (params::id::curveEnable[d]) >= 0.5f;
 
     // Rewind (5.7).
     settings.rewindOn            = parameterValue (params::id::rewindOn) >= 0.5f;
@@ -415,13 +429,18 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
 {
     FeedbackPath::Settings settings;
 
-    settings.highpassHz = modulated (mod::Destination::loopHighpass);
+    // The Loop stage switch takes the colour out but leaves Damping, which is
+    // a main-page knob, and the limiter, which is never optional.
+    const auto loopOn = parameterValue (params::id::loopOn) >= 0.5f;
+    const auto ageOn  = parameterValue (params::id::ageOn) >= 0.5f;
+
+    settings.highpassHz = loopOn ? modulated (mod::Destination::loopHighpass) : 20.0f;
     settings.lowpassHz  = modulated (mod::Destination::loopLowpass);
-    settings.resonance  = parameterValue (params::id::fbResonance) * 0.01f;
+    settings.resonance  = loopOn ? parameterValue (params::id::fbResonance) * 0.01f : 0.0f;
 
     const auto index    = juce::jlimit (0, (int) kShimmerIntervals.size() - 1,
                                         (int) parameterValue (params::id::shimmerInterval));
-    const auto chaosAmt = parameterValue (params::id::chaos) * 0.01f;
+    const auto chaosAmt = chaosAmount();
 
     auto shimmer = kShimmerIntervals[(size_t) index]
                  + (modulated (mod::Destination::shimmerFine)
@@ -436,10 +455,10 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
                                        juce::jlimit (0, 11, (int) parameterValue (params::id::quantizeRoot)));
 
     settings.shimmerSemitones = shimmer;
-    settings.shimmerAmount    = modulated (mod::Destination::shimmerAmount) * 0.01f;
-    settings.diffuse          = modulated (mod::Destination::diffuse) * 0.01f;
+    settings.shimmerAmount    = loopOn ? modulated (mod::Destination::shimmerAmount) * 0.01f : 0.0f;
+    settings.diffuse          = loopOn ? modulated (mod::Destination::diffuse) * 0.01f : 0.0f;
     settings.satType          = juce::jlimit (0, 2, (int) parameterValue (params::id::satType));
-    settings.drive            = modulated (mod::Destination::drive) * 0.01f;
+    settings.drive            = loopOn ? modulated (mod::Destination::drive) * 0.01f : 0.0f;
 
     // Global Lifetime Curve destinations resolve from the average age of the
     // live grains (5.9): the loop filters are replaced while their curve is
@@ -447,7 +466,7 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     // then lowers further.
     using lifetime::Destination;
     const auto ageNorm = getAverageAgeNormalised();
-    const auto curveOn = [this] (Destination d) { return parameterValue (params::id::curveEnable[(size_t) d]) >= 0.5f; };
+    const auto curveOn = [&] (Destination d) { return ageOn && parameterValue (params::id::curveEnable[(size_t) d]) >= 0.5f; };
     const auto curveAt = [&] (Destination d) { return activeCurves.curves[(size_t) d].evaluate (ageNorm); };
 
     if (curveOn (Destination::lowpass))    settings.lowpassHz  = lifetime::lowpassHz (curveAt (Destination::lowpass));
@@ -455,12 +474,13 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     if (curveOn (Destination::bitDepth))   settings.baseBits   = lifetime::bitDepth (curveAt (Destination::bitDepth));
     if (curveOn (Destination::sampleRate)) settings.baseSampleRateHz = lifetime::sampleRateHz (curveAt (Destination::sampleRate), currentSampleRate);
 
-    // Per-pass Degrade (5.6 A).
-    settings.degradeBitsPerPass   = modulated (mod::Destination::degradeBits);
-    settings.degradeRatePerPass   = modulated (mod::Destination::degradeRate) * 0.01f;
-    settings.degradeNoise         = modulated (mod::Destination::degradeNoise) * 0.01f;
-    settings.degradeTiltHzPerPass = modulated (mod::Destination::degradeTilt);
-    settings.degradeDriftCents    = modulated (mod::Destination::degradeDrift);
+    // Per-pass Degrade (5.6 A), part of the Age stage.
+    const auto age = ageOn ? 1.0f : 0.0f;
+    settings.degradeBitsPerPass   = modulated (mod::Destination::degradeBits) * age;
+    settings.degradeRatePerPass   = modulated (mod::Destination::degradeRate) * 0.01f * age;
+    settings.degradeNoise         = modulated (mod::Destination::degradeNoise) * 0.01f * age;
+    settings.degradeTiltHzPerPass = modulated (mod::Destination::degradeTilt) * age;
+    settings.degradeDriftCents    = modulated (mod::Destination::degradeDrift) * age;
     settings.driftDirection       = juce::jlimit (0, 2, (int) parameterValue (params::id::degradeDriftDir));
     settings.passSeconds          = resolveTimeSeconds();
 
@@ -472,8 +492,9 @@ GrainEngine::TransientResponse SillageAudioProcessor::resolveTransientResponse()
     GrainEngine::TransientResponse response;
 
     const auto synced = parameterValue (params::id::sync) >= 0.5f;
+    const auto on     = parameterValue (params::id::transientsOn) >= 0.5f;
 
-    response.retrigger  = parameterValue (params::id::retriggerOn) >= 0.5f;
+    response.retrigger  = on && parameterValue (params::id::retriggerOn) >= 0.5f;
     response.burstCount = (int) parameterValue (params::id::retriggerCount);
     response.burstIntervalSamples = synced
         ? params::divisionSeconds ((int) parameterValue (params::id::retriggerDivision),
@@ -486,7 +507,7 @@ GrainEngine::TransientResponse SillageAudioProcessor::resolveTransientResponse()
                                 + (double) parameterValue (params::id::retriggerOffset) * 0.001 * currentSampleRate;
     response.burstAmount = parameterValue (params::id::retriggerAmount) * 0.01f;
 
-    response.choke            = parameterValue (params::id::chokeOn) >= 0.5f;
+    response.choke            = on && parameterValue (params::id::chokeOn) >= 0.5f;
     response.chokeAmount      = parameterValue (params::id::chokeAmount) * 0.01f;
     response.chokeFadeSamples = (double) parameterValue (params::id::chokeFade) * 0.001 * currentSampleRate;
     response.chokeProtectSamples = (double) OnsetDetector::kDetectionLagSamples;
@@ -502,7 +523,8 @@ WakeEngine::Settings SillageAudioProcessor::resolveWakeSettings() const
 {
     WakeEngine::Settings settings;
     settings.isolated            = (params::WakeMode) (int) parameterValue (params::id::wakeMode) == params::WakeMode::isolated;
-    settings.displace            = juce::jlimit (0.0f, 1.0f, modulated (mod::Destination::displace) * 0.01f);
+    settings.displace            = parameterValue (params::id::transientsOn) >= 0.5f
+                                 ? juce::jlimit (0.0f, 1.0f, modulated (mod::Destination::displace) * 0.01f) : 0.0f;
     settings.displaceFadeSamples = (double) parameterValue (params::id::chokeFade) * 0.001 * currentSampleRate;
     return settings;
 }
@@ -633,7 +655,8 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         juce::Decibels::decibelsToGain (parameterValue (params::id::output)));
     widthSmoothed.setTargetValue (parameterValue (params::id::width) * 0.01f);
 
-    const auto ducking   = parameterValue (params::id::duckOn) >= 0.5f;
+    const auto ducking   = parameterValue (params::id::duckOn) >= 0.5f
+                        && parameterValue (params::id::transientsOn) >= 0.5f;
     const auto duckDepth = parameterValue (params::id::duckDepth) * 0.01f;
     duck.setTimes (parameterValue (params::id::duckAttack), parameterValue (params::id::duckRelease));
 
