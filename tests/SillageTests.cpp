@@ -1945,6 +1945,45 @@ void testStageSwitchesSilenceTheirStage()
     }
 }
 
+// A grain longer than its distance behind the write head reads audio that is
+// not written yet. Its age has to come from what is already there, or the
+// stale ring a lap ahead makes it look ten seconds old and everything that
+// works by age (Decay, the Lifetime Curves, Degrade) treats it as dead.
+void testGrainsLongerThanTheirOffsetAreNotOld()
+{
+    // Level curve 1 -> 0 over a 2 s Lifetime: audio 30 ms old plays at nearly
+    // full level, whatever the grain's length.
+    const auto wetWith = [] (float sizeMs)
+    {
+        auto p = makeProcessor();
+        configureAsPlainDelay (*p);
+        setParam (*p, params::id::time, 30.0f);
+        setParam (*p, params::id::size, sizeMs);
+        setParam (*p, params::id::density, 100.0f);
+        setParam (*p, params::id::lifetime, 2000.0f);
+        setLine (*p, lifetime::Destination::level, 1.0f, 0.0f, true);
+
+        Audio out;
+        render (*p, 1.0, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out);
+        return rms (out[0], atSecond (0.5), atSecond (1.0));
+    };
+
+    const auto shortGrain = wetWith (20.0f); // shorter than Time
+    const auto longGrain  = wetWith (60.0f); // longer than Time
+    std::printf ("       level curve: 20 ms grains %.4f  60 ms grains %.4f\n", shortGrain, longGrain);
+    check (shortGrain > 0.1, "a grain shorter than Time plays young audio at full level");
+    check (longGrain > shortGrain * 0.5, "a grain longer than Time is still young audio, not ten seconds old");
+
+    // The same with Decay: the Reverb type at Spread 0 has Size 40 ms over Time 30 ms.
+    auto p = makeProcessor();
+    types::apply (*p, types::Type::reverb);
+    setParam (*p, params::id::mix, 100.0f);
+    setParam (*p, params::id::spread, 0.0f);
+    Audio out;
+    render (*p, 1.0, [] (int64_t i, int) { return sine (i, 220.0) * 0.5f; }, out);
+    check (rms (out[0], atSecond (0.5), atSecond (1.0)) > 0.02, "Reverb type at Spread 0 is an echo, not silence");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2013,6 +2052,7 @@ int main()
     testDecayLimitsSpreadReach();
     testRoomKeepsTheHit();
     testStageSwitchesSilenceTheirStage();
+    testGrainsLongerThanTheirOffsetAreNotOld();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

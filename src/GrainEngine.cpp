@@ -367,8 +367,16 @@ float GrainEngine::ageAt (double position) const noexcept
 
 float GrainEngine::ageOfRegion (double startPos, double span) const noexcept
 {
-    // The handoff's "average across the grain's window": start, middle, end.
-    return (ageAt (startPos) + ageAt (startPos + span * 0.5) + ageAt (startPos + span)) * (1.0f / 3.0f);
+    // The handoff's "average across the grain's window": start, middle, end —
+    // but never past the write head. A grain longer than its distance behind
+    // the head will read audio that is not written yet; the ring still holds
+    // what was there a lap ago, which would read as ten seconds old.
+    auto behind = (double) writePos - startPos;
+    while (behind < 0.0)                behind += (double) capacity;
+    while (behind >= (double) capacity) behind -= (double) capacity;
+
+    const auto reach = juce::jmin (span, juce::jmax (0.0, behind - 1.0));
+    return (ageAt (startPos) + ageAt (startPos + reach * 0.5) + ageAt (startPos + reach)) * (1.0f / 3.0f);
 }
 
 int GrainEngine::claimSlot()
