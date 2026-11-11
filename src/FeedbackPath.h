@@ -63,7 +63,7 @@ public:
         float  degradeTiltHzPerPass = 0.0f; // 0..500
         float  degradeDriftCents    = 0.0f; // 0..50, direction applied below
         int    driftDirection       = 0;    // 0 up, 1 down, 2 random
-        double passSeconds          = 0.35; // Time, for age -> passes
+        double passSeconds          = 0.35; // one trip through the loop, for age -> passes
         float  baseBits             = 24.0f;  // Lifetime curve may lower this
         float  baseSampleRateHz     = 0.0f;   // 0 = full rate; curve may lower
     };

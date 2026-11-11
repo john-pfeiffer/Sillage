@@ -23,9 +23,11 @@ const std::vector<Override>& overridesFor (Type type)
     namespace id = params::id;
     using params::kDecayOffMs;
 
+    // Hann grains at exactly two per length sum to a constant, so the repeats
+    // are the input and nothing else.
     static const std::vector<Override> delayTable {
-        { id::time, 375.0f }, { id::decay, kDecayOffMs }, { id::density, 24.0f }, { id::spread, 0.0f },
-        { id::size, 60.0f }, { id::window, 1.0f }, { id::feedback, 45.0f }, { id::panSpread, 0.0f },
+        { id::time, 375.0f }, { id::decay, kDecayOffMs }, { id::density, 25.0f }, { id::spread, 0.0f },
+        { id::size, 80.0f }, { id::window, 0.0f }, { id::feedback, 45.0f }, { id::panSpread, 0.0f },
         { id::fbHighpass, 150.0f }, { id::fbLowpass, 8000.0f }, { id::diffuse, 0.0f }, { id::shimmerAmount, 0.0f },
     };
 
@@ -53,16 +55,17 @@ const std::vector<Override>& overridesFor (Type type)
     };
 
     static const std::vector<Override> washTable {
-        { id::time, 1200.0f }, { id::decay, 8000.0f }, { id::density, 60.0f }, { id::spread, 100.0f },
-        { id::size, 400.0f }, { id::window, 2.0f }, { id::feedback, 90.0f }, { id::panSpread, 100.0f },
+        { id::time, 80.0f }, { id::decay, 8000.0f }, { id::density, 80.0f }, { id::spread, 100.0f },
+        { id::size, 200.0f }, { id::window, 2.0f }, { id::feedback, 90.0f }, { id::panSpread, 100.0f },
         { id::fbHighpass, 80.0f }, { id::fbLowpass, 4000.0f }, { id::diffuse, 80.0f }, { id::shimmerAmount, 0.0f },
         { id::degradeTilt, 60.0f }, { id::lifetime, 6000.0f },
         { id::width, 150.0f },
     };
 
+    // Sparse, pitched, half-reversed grains over a three-second window.
     static const std::vector<Override> granularTable {
-        { id::time, 250.0f }, { id::decay, kDecayOffMs }, { id::density, 20.0f }, { id::spread, 60.0f },
-        { id::size, 40.0f }, { id::window, 3.0f }, { id::feedback, 55.0f }, { id::panSpread, 70.0f },
+        { id::time, 250.0f }, { id::decay, 3000.0f }, { id::density, 30.0f }, { id::spread, 60.0f },
+        { id::size, 60.0f }, { id::window, 3.0f }, { id::feedback, 60.0f }, { id::panSpread, 70.0f },
         { id::fbHighpass, 100.0f }, { id::fbLowpass, 12000.0f }, { id::diffuse, 0.0f }, { id::shimmerAmount, 0.0f },
         { id::pitchSpread, 20.0f }, { id::reverse, 30.0f }, { id::chaos, 25.0f },
     };

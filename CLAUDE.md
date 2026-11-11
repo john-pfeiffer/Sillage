@@ -23,10 +23,13 @@
 - **DSP invariants:** the feedback-loop limiter is what makes Feedback > 100 % and
   Chaos safe — never remove it or place color stages after it; the grain cap
   (`kMaxGrains = 64`) is compile-time; per-grain work must stay cheap (8+ instances
-  per session is the CPU budget). Decay is one feature with two halves — the age gate in
-  `resolveShape` and the Spread reach limit in `spawnScheduledGrain` — never ship one
-  without the other, and Off (`params::decayIsOff`) must leave the engine exactly as it
-  was without Decay.
+  per session is the CPU budget). Decay is one model in three places — `decay::resolve`
+  (`src/DecayModel.h`: the one-trip window, the loop gain, the wet gain), the windowed cloud
+  in `spawnScheduledGrain`, and the two gains applied in `GrainEngine::process` — never
+  change one without the others, and `testDecayHoldsTheTailLength` is what says they still
+  agree. The cloud starts one grain length behind Time: a grain that reads closer than it is
+  long re-reads itself and the loop runs away. Off (`params::decayIsOff`) must take none of
+  those paths.
 - **Parameter IDs** live only in `src/Parameters.h` (`params::id::…`); the editor
   builds its tabs from ID tables in `src/PluginEditor.cpp` (`SectionPage`); keep the README
   parameter table current when the set changes.

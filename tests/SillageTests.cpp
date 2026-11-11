@@ -280,6 +280,112 @@ Generator decayingBurst (double hz, double untilSeconds, double decaySeconds, fl
     };
 }
 
+// Deterministic white noise in -1..1 from the sample index.
+float noiseAt (int64_t sample)
+{
+    auto x = (uint32_t) sample * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    x = (x >> 22u) ^ x;
+    return (float) (x & 0xffffu) / 32768.0f - 1.0f;
+}
+
+Generator noiseBurst (double untilSeconds, float amplitude = 0.3f)
+{
+    const auto until = (int64_t) (untilSeconds * kSampleRate);
+    return [=] (int64_t i, int) { return i < until ? noiseAt (i) * amplitude : 0.0f; };
+}
+
+// Two bars of something like music: a kick on the beat, a hat off it and an
+// arpeggio on eighths, at 120 bpm. What the level checks are measured on.
+Generator phrase (double untilSeconds)
+{
+    return [=] (int64_t i, int) -> float
+    {
+        const auto t = (double) i / kSampleRate;
+        if (t >= untilSeconds)
+            return 0.0f;
+
+        static constexpr double notes[8] { 220.0, 261.63, 329.63, 440.0, 392.0, 329.63, 261.63, 293.66 };
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        const auto kickT = std::fmod (t, 0.5);
+        auto value = 0.5 * std::sin (twoPi * (50.0 * kickT + 100.0 * 0.03 * (1.0 - std::exp (-kickT / 0.03))))
+                         * std::exp (-kickT / 0.12);
+
+        const auto hatT = std::fmod (t + 0.25, 0.5);
+        value += 0.12 * (double) (noiseAt (i) - noiseAt (i - 1)) * std::exp (-hatT / 0.02);
+
+        const auto noteT = std::fmod (t, 0.25);
+        double note = 0.0;
+        for (int k = 1; k <= 6; ++k)
+            note += std::sin (twoPi * notes[(int) (t / 0.25) % 8] * k * noteT) / k;
+        value += 0.2 * note * std::exp (-noteT / 0.2) * std::min (1.0, noteT / 0.002);
+
+        return (float) value;
+    };
+}
+
+// RT60 from the backward-integrated energy after `fromSeconds`: the time the
+// curve takes from -5 to -35 dB, doubled. 0 if it never gets there.
+double schroederRt60 (const Audio& audio, double fromSeconds)
+{
+    const auto start = atSecond (fromSeconds);
+    const auto n = audio[0].size();
+    if (n <= start)
+        return 0.0;
+
+    std::vector<double> energy (n - start + 1, 0.0);
+    for (size_t i = n; i-- > start;)
+        energy[i - start] = energy[i - start + 1] + (double) audio[0][i] * audio[0][i]
+                                                  + (double) audio[1][i] * audio[1][i];
+    if (energy[0] <= 1.0e-18)
+        return 0.0;
+
+    double t5 = -1.0, t35 = -1.0;
+    for (size_t i = 0; i < energy.size(); ++i)
+    {
+        const auto level = 10.0 * std::log10 (std::max (energy[i] / energy[0], 1.0e-30));
+        if (t5 < 0.0 && level <= -5.0)
+            t5 = (double) i / kSampleRate;
+        if (level <= -35.0)
+        {
+            t35 = (double) i / kSampleRate;
+            break;
+        }
+    }
+    return (t5 >= 0.0 && t35 >= 0.0) ? 2.0 * (t35 - t5) : 0.0;
+}
+
+// Power of one frequency over [begin, end), by Goertzel.
+double tonePower (const std::vector<float>& channel, double hz, size_t begin, size_t end)
+{
+    const auto last  = std::min (end, channel.size());
+    const auto coeff = 2.0 * std::cos (juce::MathConstants<double>::twoPi * hz / kSampleRate);
+    double s1 = 0.0, s2 = 0.0;
+    for (size_t i = begin; i < last; ++i)
+    {
+        const auto s0 = (double) channel[i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    const auto n = (double) std::max<size_t> (1, last - begin);
+    return (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (n * n);
+}
+
+// How bright a stretch of audio is: the power of its first difference over
+// its own power. Rises with high-frequency content, independent of level.
+double brightness (const std::vector<float>& channel, size_t begin, size_t end)
+{
+    const auto last = std::min (end, channel.size());
+    double power = 0.0, difference = 0.0;
+    for (size_t i = begin + 1; i < last; ++i)
+    {
+        power      += (double) channel[i] * channel[i];
+        difference += (double) (channel[i] - channel[i - 1]) * (channel[i] - channel[i - 1]);
+    }
+    return power > 1.0e-18 ? difference / power : 0.0;
+}
+
 // ---- Phase 1 + 2 ----------------------------------------------------------------
 
 void testPassThroughAtFullDry()
@@ -1757,8 +1863,9 @@ void testTypesGiveUsableStartingPoints()
 
 // ---- Decay and the stage switches -----------------------------------------------
 
-// Decay is an RT60 on the audio's age: whatever Feedback says, a tail ends at
-// Decay. At Off, Feedback alone decides (the behaviour every test above relies on).
+// Decay is the length of the tail: a short one ends a tail that Feedback alone
+// would hold for seconds. At Off, Feedback alone decides (the behaviour every
+// test above relies on).
 void testDecayEndsTheTail()
 {
     const auto tailAt = [] (float decayMs)
@@ -1781,9 +1888,10 @@ void testDecayEndsTheTail()
            "only the top of the Decay range reads Off");
 }
 
-// Decay also bounds how far back Spread may read, so a short Decay at Spread
-// 100 is a room around the last few hundred milliseconds, not a smear across
-// the whole buffer. That is what makes the delay-to-reverb slider continuous.
+// Decay also bounds how far behind Time Spread may read, so a short Decay at
+// Spread 100 is a room around the last few hundred milliseconds, not a smear
+// across the whole buffer. That is what makes the delay-to-reverb slider
+// continuous.
 void testDecayLimitsSpreadReach()
 {
     const auto oldAudioAt = [] (float decayMs)
@@ -1984,6 +2092,163 @@ void testGrainsLongerThanTheirOffsetAreNotOld()
     check (rms (out[0], atSecond (0.5), atSecond (1.0)) > 0.02, "Reverb type at Spread 0 is an echo, not silence");
 }
 
+// Decay is the length of the tail and Feedback is how much of it the loop
+// rebuilds: the two have to hold together across the whole delay-to-reverb
+// range. At Feedback 100 % the tail is Decay long at any Spread; below that it
+// is never longer.
+void testDecayHoldsTheTailLength()
+{
+    const auto rt60 = [] (float decayMs, float spread, float feedback)
+    {
+        double sum = 0.0;
+        constexpr int renders = 3; // the grain scheduler is random
+        for (int r = 0; r < renders; ++r)
+        {
+            auto p = makeProcessor();
+            configureAsPlainDelay (*p);
+            setParam (*p, params::id::time, 60.0f);
+            setParam (*p, params::id::size, 30.0f);
+            setParam (*p, params::id::density, 200.0f);
+            setParam (*p, params::id::decay, decayMs);
+            setParam (*p, params::id::spread, spread);
+            setParam (*p, params::id::feedback, feedback);
+
+            Audio out;
+            render (*p, 0.25 + 3.0 * decayMs * 0.001 + 0.5, noiseBurst (0.25), out);
+            sum += schroederRt60 (out, 0.25);
+        }
+        return sum / renders;
+    };
+
+    bool heldAtUnity = true, neverLonger = true;
+    for (float decayMs : { 600.0f, 1500.0f })
+        for (float spread : { 0.0f, 50.0f, 100.0f })
+        {
+            const auto seconds = (double) decayMs * 0.001;
+            const auto half = rt60 (decayMs, spread, 50.0f);
+            const auto full = rt60 (decayMs, spread, 100.0f);
+            std::printf ("       decay %.1f s, spread %3.0f: RT60 %.2f s at Feedback 50, %.2f s at 100\n",
+                         seconds, spread, half, full);
+
+            heldAtUnity = heldAtUnity && full > seconds * 0.7 && full < seconds * 1.3;
+            neverLonger = neverLonger && half < seconds * 1.35 && half <= full * 1.4;
+        }
+
+    check (heldAtUnity, "Feedback 100 %: the tail is Decay long at Spread 0, 50 and 100");
+    check (neverLonger, "Feedback 50 %: the tail is never longer than Decay, nor than at 100 %");
+}
+
+// With Decay on, the loop still has to be heard: that is where Damping,
+// Shimmer and the rest of the Feedback tab live. Measured on the Reverb type.
+void testLoopColoursTheTailWithDecayOn()
+{
+    const auto reverb = [] (float feedback)
+    {
+        auto p = makeProcessor();
+        types::apply (*p, types::Type::reverb);
+        setParam (*p, params::id::mix, 100.0f);
+        setParam (*p, params::id::panSpread, 0.0f);
+        setParam (*p, params::id::feedback, feedback);
+        return p;
+    };
+
+    // Shimmer +12 puts an octave above a 220 Hz tone into the tail, and only
+    // through the loop: Feedback 0 leaves none.
+    const auto octave = [&] (float feedback, float shimmer)
+    {
+        double sum = 0.0;
+        for (int r = 0; r < 3; ++r)
+        {
+            auto p = reverb (feedback);
+            setParam (*p, params::id::shimmerInterval, 6.0f);
+            setParam (*p, params::id::shimmerAmount, shimmer);
+            Audio out;
+            render (*p, 2.0, toneThenSilence (220.0, 0.8), out);
+            sum += tonePower (out[0], 440.0, atSecond (0.9), atSecond (1.6))
+                 / std::max (1.0e-18, tonePower (out[0], 220.0, atSecond (0.9), atSecond (1.6)));
+        }
+        return sum / 3.0;
+    };
+
+    const auto plain = octave (100.0f, 0.0f), shimmered = octave (100.0f, 100.0f), noLoop = octave (0.0f, 100.0f);
+    std::printf ("       octave over fundamental in the tail: shimmer off %.4f  on %.4f  on with Feedback 0 %.4f\n",
+                 plain, shimmered, noLoop);
+    check (shimmered > plain * 8.0 && shimmered > 0.05, "Decay on: Shimmer puts its octave into the Reverb type's tail");
+    check (noLoop < shimmered * 0.25, "Decay on: with Feedback at 0 the same Shimmer adds almost nothing");
+
+    // Damping darkens the tail.
+    const auto tailBrightness = [&] (float lowpassHz)
+    {
+        double sum = 0.0;
+        for (int r = 0; r < 3; ++r)
+        {
+            auto p = reverb (100.0f);
+            setParam (*p, params::id::fbLowpass, lowpassHz);
+            Audio out;
+            render (*p, 2.0, noiseBurst (0.25), out);
+            sum += brightness (out[0], atSecond (0.6), atSecond (1.4));
+        }
+        return sum / 3.0;
+    };
+
+    const auto open = tailBrightness (20000.0f), damped = tailBrightness (500.0f);
+    std::printf ("       tail brightness: Damping open %.4f  at 500 Hz %.4f\n", open, damped);
+    check (damped < open * 0.5, "Decay on: Damping at 500 Hz darkens the Reverb type's tail");
+}
+
+// Every Type's wet sits near the level of what went in, so choosing a Type or
+// turning Spread is not also a volume change, and a 30 % Mix is always heard.
+void testTypesSitAtTheDryLevel()
+{
+    const auto source = phrase (4.0);
+    std::vector<float> dry;
+    for (int64_t i = 0; i < (int64_t) atSecond (4.0); ++i)
+        dry.push_back (source (i, 0));
+    const auto dryRms = rms (dry, atSecond (0.5), atSecond (4.0));
+
+    for (int t = 0; t < types::kNumTypes; ++t)
+    {
+        double sum = 0.0;
+        for (int r = 0; r < 2; ++r)
+        {
+            auto p = makeProcessor();
+            types::apply (*p, (types::Type) t);
+            setParam (*p, params::id::mix, 100.0f);
+            Audio out;
+            render (*p, 4.0, source, out);
+            const auto left = rms (out[0], atSecond (0.5), atSecond (4.0)), right = rms (out[1], atSecond (0.5), atSecond (4.0));
+            sum += std::sqrt (0.5 * (left * left + right * right));
+        }
+
+        const auto db = 20.0 * std::log10 (std::max (1.0e-9, sum / 2.0 / dryRms));
+        std::printf ("       %-9s wet %+.1f dB against the dry\n", types::kTypeNames[(size_t) t], db);
+        check (std::abs (db) < 4.0, (juce::String (types::kTypeNames[(size_t) t]) + ": wet within 4 dB of the dry").toRawUTF8());
+    }
+}
+
+// The Delay type is a delay: with Feedback at 0 a steady tone comes back as
+// itself, at its own level, without the grains beating.
+void testDelayTypeRepeatsAtUnity()
+{
+    auto p = makeProcessor();
+    types::apply (*p, types::Type::delay);
+    setParam (*p, params::id::mix, 100.0f);
+    setParam (*p, params::id::feedback, 0.0f);
+
+    Audio out;
+    render (*p, 2.0, [] (int64_t i, int) { return sine (i, 440.0) * 0.3f; }, out);
+
+    float lowest = 1.0f, highest = 0.0f;
+    for (double t = 1.0; t < 1.95; t += 0.005)
+    {
+        const auto level = peakSeconds (out, t, t + 0.005);
+        lowest  = std::min (lowest, level);
+        highest = std::max (highest, level);
+    }
+    std::printf ("       delay type, 0.3 sine in: 5 ms peaks between %.3f and %.3f\n", lowest, highest);
+    check (lowest > 0.27f && highest < 0.34f, "Delay type: a steady tone repeats at its own level, without flutter");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2053,6 +2318,11 @@ int main()
     testRoomKeepsTheHit();
     testStageSwitchesSilenceTheirStage();
     testGrainsLongerThanTheirOffsetAreNotOld();
+
+    testDecayHoldsTheTailLength();
+    testLoopColoursTheTailWithDecayOn();
+    testTypesSitAtTheDryLevel();
+    testDelayTypeRepeatsAtUnity();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

@@ -205,10 +205,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     // ---- Age & per-pass Degrade (5.6) ---------------------------------------
     layout.add (makeFloat (id::lifetime, "Lifetime", skewed (100.0f, 30000.0f, 2000.0f), 2000.0f, label ("ms")));
+    // Wide enough to be heard within three or four repeats: at 2 bits a pass
+    // a tail has faded out long before it reaches a depth that crunches.
     layout.add (makeFloat (id::degradeBits, "Bits/pass",
-                           juce::NormalisableRange<float> (0.0f, 2.0f), 0.0f, label ("bit")));
+                           juce::NormalisableRange<float> (0.0f, 6.0f), 0.0f, label ("bit")));
     layout.add (makeFloat (id::degradeRate, "SR/pass",
-                           juce::NormalisableRange<float> (0.0f, 10.0f), 0.0f, label ("%")));
+                           juce::NormalisableRange<float> (0.0f, 40.0f), 0.0f, label ("%")));
     layout.add (makeFloat (id::degradeNoise, "Noise/pass", percent(), 0.0f, label ("%")));
     layout.add (makeFloat (id::degradeTilt, "LP tilt/pass",
                            juce::NormalisableRange<float> (0.0f, 500.0f), 0.0f, label ("Hz")));

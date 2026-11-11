@@ -338,8 +338,17 @@ void SillageAudioProcessor::updateModulation (int numSamples, float envelope, in
 
 // ---- Settings ----------------------------------------------------------------
 
+decay::Model SillageAudioProcessor::resolveDecayModel (float spread, float feedback) const
+{
+    const auto decayMs = modulated (mod::Destination::decay);
+    return decay::resolve (params::decayIsOff (decayMs) ? 0.0 : (double) decayMs * 0.001,
+                           resolveTimeSeconds(), (double) spread, (double) feedback,
+                           (double) modulated (mod::Destination::size) * 0.001, kBufferSeconds);
+}
+
 GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosValues& chaos,
-                                                                   float envelope) const
+                                                                   float envelope,
+                                                                   decay::Model& decayModel) const
 {
     GrainEngine::Settings settings;
 
@@ -364,10 +373,6 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     spread += parameterValue (params::id::envSpread) * 0.01f * envelopes * bipolar * 0.5f;
     settings.spread = juce::jlimit (0.0f, 1.0f, spread);
 
-    // Decay: Off (the top of the range) leaves the tail to Feedback alone.
-    const auto decayMs = modulated (mod::Destination::decay);
-    settings.decaySeconds = params::decayIsOff (decayMs) ? 0.0 : (double) decayMs * 0.001;
-
     settings.sizeSamples = (double) modulated (mod::Destination::size) * 0.001 * currentSampleRate;
     settings.window      = (WindowShape) juce::jlimit (
         0, (int) WindowShape::numShapes - 1, (int) parameterValue (params::id::window));
@@ -376,6 +381,13 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     // purpose and the limiter is what keeps that musical.
     settings.feedback = modulated (mod::Destination::feedback) * 0.01f
                       + chaosAmt * kChaosFeedbackBoost * (chaos.feedback + 1.0f) * 0.5f;
+
+    // Decay: Off (the top of the range) leaves the tail to Feedback alone.
+    // On, it sets the one-trip window and what the loop is allowed to add.
+    decayModel = resolveDecayModel (settings.spread, settings.feedback);
+    settings.decayWindowSeconds = decayModel.windowSeconds;
+    settings.loopGain           = (float) decayModel.loopGain;
+    settings.wetGain            = (float) decayModel.wetGain;
 
     settings.pitchSemitones    = modulated (mod::Destination::pitch)
                                + parameterValue (params::id::pitchFine) * 0.01f;
@@ -425,7 +437,8 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     return settings;
 }
 
-FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const ChaosValues& chaos) const
+FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const ChaosValues& chaos,
+                                                                       double tripSeconds) const
 {
     FeedbackPath::Settings settings;
 
@@ -482,7 +495,9 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     settings.degradeTiltHzPerPass = modulated (mod::Destination::degradeTilt) * age;
     settings.degradeDriftCents    = modulated (mod::Destination::degradeDrift) * age;
     settings.driftDirection       = juce::jlimit (0, 2, (int) parameterValue (params::id::degradeDriftDir));
-    settings.passSeconds          = resolveTimeSeconds();
+    // "Per pass" is per trip through the loop: Time at Spread 0, the cloud's
+    // own average reach as Spread opens up.
+    settings.passSeconds          = tripSeconds;
 
     return settings;
 }
@@ -617,11 +632,14 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     wetBuffer.setSize (numOut, numSamples, false, false, true);
 
-    wake.setFeedbackSettings (resolveFeedbackSettings (chaos));
+    decay::Model decayModel;
+    const auto grainSettings = resolveGrainSettings (chaos, envelope, decayModel);
+
+    wake.setFeedbackSettings (resolveFeedbackSettings (chaos, decayModel.tripSeconds));
     wake.process (buffer.getArrayOfReadPointers(),
                   wetBuffer.getArrayOfWritePointers(),
                   numOut, numSamples,
-                  resolveGrainSettings (chaos, envelope),
+                  grainSettings,
                   resolveWakeSettings(),
                   onsetOffsets.data(), numOnsets,
                   resolveTransientResponse());

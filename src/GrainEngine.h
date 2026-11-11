@@ -137,9 +137,14 @@ public:
         const lifetime::CurveSet* curves = nullptr;
         std::array<bool, lifetime::kNumDestinations> curveEnabled {};
 
-        // Decay: audio older than this fades to -60 dB and Spread reaches no
-        // further back than this (or Time, whichever is longer). <= 0 is Off.
-        double decaySeconds = 0.0;
+        // Decay, resolved by decay::resolve (DecayModel.h). One trip through
+        // the buffer costs 60 dB per window, Spread reaches no further back
+        // than the window (or Time, whichever is longer), the loop's gain is
+        // Feedback times loopGain, and wetGain holds the level as the loop
+        // takes over. A window <= 0 is Off: none of it applies.
+        double decayWindowSeconds = 0.0;
+        float  loopGain           = 1.0f;
+        float  wetGain            = 1.0f;
 
         // Rewind (5.7).
         bool   rewindOn            = false;
@@ -292,8 +297,10 @@ private:
     float stealFadeStep = 0.0f;
 
     // Feedback is the one grain parameter that cannot resolve at grain birth —
-    // it scales a running signal — so it is the one that needs smoothing.
+    // it scales a running signal — so it is the one that needs smoothing. The
+    // wet gain that goes with Decay scales the same running signal.
     juce::SmoothedValue<float> feedbackSmoothed;
+    juce::SmoothedValue<float> wetGainSmoothed;
 
     // Freeze: crossfades the write in and out; the head stops at 0.
     float writeGain = 1.0f;

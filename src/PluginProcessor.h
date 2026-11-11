@@ -4,6 +4,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 
+#include "DecayModel.h"
 #include "GrainEngine.h"
 #include "LifetimeCurves.h"
 #include "Modulation.h"
@@ -98,8 +99,10 @@ private:
     void updateTransport();
     void updateModulation (int numSamples, float envelope, int numOnsets);
     double resolveTimeSeconds() const;
-    GrainEngine::Settings resolveGrainSettings (const ChaosValues& chaos, float envelope) const;
-    FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos) const;
+    decay::Model resolveDecayModel (float spread, float feedback) const;
+    GrainEngine::Settings resolveGrainSettings (const ChaosValues& chaos, float envelope,
+                                                decay::Model& decayModel) const;
+    FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos, double tripSeconds) const;
     GrainEngine::TransientResponse resolveTransientResponse() const;
     WakeEngine::Settings resolveWakeSettings() const;
     void updateRewindTriggers (int numSamples);

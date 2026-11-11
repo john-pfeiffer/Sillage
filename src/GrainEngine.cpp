@@ -1,4 +1,5 @@
 #include "GrainEngine.h"
+#include "DecayModel.h"
 
 #include <limits>
 
@@ -103,11 +104,44 @@ constexpr double kStealFadeSeconds = 0.002;
 // Crossfade when a new Rewind trigger restarts a running playback.
 constexpr double kRewindFadeSeconds = 0.02;
 
+// The most a grain in a sparse cloud is raised to keep the cloud's level.
+constexpr double kMaxSparseMakeup = 3.0;
+
+// Reads scattered by more than this no longer sum in phase.
+constexpr double kCoherentSeconds = 0.002;
+
 // Samples of clearance kept between any read head and the write head.
 constexpr double kReadGuard = 8.0;
 
-// ln(1000): a level that falls by this exponent per Decay is -60 dB at Decay.
-constexpr double kRt60 = 6.907755;
+// What a window sums to when grains overlap: its mean when they read the same
+// audio in step, its mean square when they do not. The loudness compensation
+// needs both, per shape — a trapezoid carries nearly twice what a Hann does.
+struct WindowStats
+{
+    std::array<double, (size_t) WindowShape::numShapes> mean {}, meanSquare {};
+};
+
+const WindowStats& windowStats()
+{
+    static const WindowStats stats = []
+    {
+        WindowStats result;
+        const auto& tables = windowTables();
+        for (size_t shape = 0; shape < tables.size(); ++shape)
+        {
+            double sum = 0.0, squares = 0.0;
+            for (int i = 0; i < kWindowTableSize; ++i)
+            {
+                sum     += (double) tables[shape][(size_t) i];
+                squares += (double) tables[shape][(size_t) i] * (double) tables[shape][(size_t) i];
+            }
+            result.mean[shape]       = sum / (double) kWindowTableSize;
+            result.meanSquare[shape] = squares / (double) kWindowTableSize;
+        }
+        return result;
+    }();
+    return stats;
+}
 } // namespace
 
 // ---- RewindPlayer ------------------------------------------------------------
@@ -263,6 +297,7 @@ void GrainEngine::prepare (double newSampleRate, int numChannels, double bufferS
         rewind.prepare (newSampleRate, channels);
 
     feedbackSmoothed.reset (newSampleRate, 0.02);
+    wetGainSmoothed.reset (newSampleRate, 0.05);
 
     feedbackPath.prepare (newSampleRate, channels);
     reset();
@@ -311,6 +346,7 @@ void GrainEngine::reset()
     averageAgeSeconds.store (0.0f);
 
     feedbackSmoothed.setCurrentAndTargetValue (0.0f);
+    wetGainSmoothed.setCurrentAndTargetValue (1.0f);
     feedbackPath.reset();
 }
 
@@ -419,12 +455,6 @@ GrainEngine::GrainShape GrainEngine::resolveShape (const Settings& settings, flo
             shape.level = value (Destination::level);
     }
 
-    // Decay: the older the audio this grain plays, the quieter it is, and at
-    // Decay it is gone (-60 dB). Recirculated audio keeps its age, so this
-    // bounds the tail whatever Feedback says.
-    if (settings.decaySeconds > 0.0)
-        shape.level *= (float) std::exp (-kRt60 * (double) juce::jmax (0.0f, ageSeconds) / settings.decaySeconds);
-
     // Per-grain Age modulation (5.9): each slot adds amount * curve(age) in
     // the destination parameter's normalised range, on top of whatever the
     // curve or the knob resolved to.
@@ -517,21 +547,36 @@ void GrainEngine::activateGrain (double startPos, double rate, const Settings& s
     // Overlapping grains sum, so compensate by the expected overlap or Density
     // and Size would double as volume controls — and Feedback would not mean
     // what it says. At Spread 0 every grain reads the same sample at the same
-    // instant, so N Hann windows sum coherently to N/2; at Spread 100 their
-    // phases are random and they sum in power to sqrt(3N/8). Blend between
+    // instant, so N windows sum coherently to N times the window's mean (N/2
+    // for a Hann); at Spread 100 their phases are random and they sum in power
+    // to sqrt(N times its mean square) (sqrt(3N/8) for a Hann). Blend between
     // the two so loop gain stays honest across the whole delay-to-reverb range.
     //
     // Coherence needs more than Spread 0: a grain playing at any rate other
     // than 1 drifts in phase against its neighbours (the comb from the pitch
     // test), and a reversed grain runs the other way entirely. Those count as
     // fully decorrelated.
+    const auto& stats    = windowStats();
+    const auto shapeIndex = (size_t) juce::jlimit (0, (int) WindowShape::numShapes - 1, (int) settings.window);
     const auto overlap   = juce::jmax (1.0, settings.density * (length / sampleRate));
-    const auto coherent  = juce::jmin (1.0, 2.0 / overlap);
-    const auto incoherent = juce::jmin (1.0, 1.0 / std::sqrt (0.375 * overlap));
+    const auto coherent  = juce::jmin (1.0, 1.0 / (stats.mean[shapeIndex] * overlap));
+    // A sparse cloud is made up too, within reason: its grains are few, so
+    // each one has to carry more for the cloud to be as loud as its source.
+    // Grains that read in step never are — a sparse delay is its gaps.
+    const auto cover      = juce::jmax (1.0e-3, settings.density * (length / sampleRate));
+    const auto incoherent = juce::jmin (kMaxSparseMakeup, 1.0 / std::sqrt (stats.meanSquare[shapeIndex] * cover));
+    //
+    // How far apart Spread puts the reads is what decides it, not the knob's
+    // position: a couple of milliseconds between two reads is already most of
+    // a cycle for anything above the bass, so a little Spread over a long
+    // reach is a cloud as far as summing goes.
+    const auto reachSeconds = settings.decayWindowSeconds > 0.0
+                            ? settings.decayWindowSeconds / (2.0 * decay::kRt60 * decay::kDensityShare)
+                            : (double) capacity / sampleRate * 0.29;
+    const auto scatter   = (double) settings.spread * reachSeconds / kCoherentSeconds;
     const auto pitched   = std::abs (rate - 1.0) > 0.005;
     const auto blend     = pitched ? 1.0
-                         : juce::jlimit (0.0, 1.0, juce::jmax ((double) settings.spread,
-                                                                (double) shape.reverseProbability * 2.0));
+                         : juce::jlimit (0.0, 1.0, juce::jmax (scatter, (double) shape.reverseProbability * 2.0));
     const auto compensation = (float) std::exp ((1.0 - blend) * std::log (coherent) + blend * std::log (incoherent))
                             * gainScale * shape.level;
 
@@ -570,25 +615,59 @@ void GrainEngine::activateGrain (double startPos, double rate, const Settings& s
 
 void GrainEngine::spawnScheduledGrain (const Settings& settings)
 {
-    // Spread interpolates from "exactly Time" to "anywhere in the buffer".
-    // Interpolating rather than clamping a random deviation is what keeps the
-    // distribution smooth instead of piling grains up at the limits. Chaos
-    // then pushes the result around on its own slow clock.
-    // Spread's random end reaches back as far as Decay (or Time, whichever is
-    // longer): a 200 ms Decay only ever reads the last 200 ms, so Spread runs
-    // from an echo at Time to a cloud filling the Decay window rather than a
-    // sparse smear across the whole buffer.
     const auto looseMin = kReadGuard;
     const auto looseMax = (double) capacity - kReadGuard;
-    const auto reach    = settings.decaySeconds > 0.0
-                        ? juce::jlimit (looseMin, looseMax,
-                                        juce::jmax (settings.timeSamples, settings.decaySeconds * sampleRate))
-                        : looseMax;
-    const auto base         = juce::jlimit (looseMin, looseMax, settings.timeSamples);
-    const auto randomOffset = looseMin + rng.nextDouble() * (reach - looseMin);
-    const auto probeOffset  = juce::jlimit (looseMin, looseMax,
-                                            base + (double) settings.spread * (randomOffset - base)
-                                                 + settings.timeModSamples);
+    const auto base     = juce::jlimit (looseMin, looseMax, settings.timeSamples);
+
+    double probeOffset = base;
+    float  gateLevel   = 1.0f;
+
+    if (settings.decayWindowSeconds > 0.0)
+    {
+        // Decay on: Time is where the sound arrives and Spread grows a cloud
+        // behind it — an echo at Spread 0, an echo with a tail in between, a
+        // cloud with Time as its pre-delay at Spread 100. One trip through
+        // the buffer costs 60 dB per window, and the cloud reaches no further
+        // than the window: a 200 ms window only ever reads 200 ms of audio.
+        //
+        // The loss is shared between how often old audio is read (reads thin
+        // out exponentially) and how loud it is when it is, so the cloud
+        // stays dense where it is loud; the make-up puts the expected power
+        // of a grain back at 1, which is what keeps the loop's gain equal to
+        // what decay::resolve asked for.
+        //
+        // The cloud starts one grain length behind Time, not on it. A grain
+        // reading closer behind the head than it is long re-reads what it and
+        // its neighbours have just written: a loop a few samples round,
+        // summing in phase, with far more gain than Feedback asked for.
+        const auto window = settings.decayWindowSeconds * sampleRate;
+        const auto lead   = juce::jmax (1.0, settings.sizeSamples);
+        const auto span   = juce::jmax (1.0, juce::jmin (window, looseMax - base - lead));
+
+        const auto total     = 2.0 * decay::kRt60 / window;        // power loss per sample
+        const auto oddsRate  = total * decay::kDensityShare;
+        const auto levelRate = total - oddsRate;
+
+        const auto oddsAtEnd = std::exp (-oddsRate * span);
+        const auto behind    = juce::jmin (span, -std::log (1.0 - rng.nextDouble() * (1.0 - oddsAtEnd)) / oddsRate);
+
+        const auto expected = (oddsRate / total) * (1.0 - std::exp (-total * span)) / (1.0 - oddsAtEnd);
+        gateLevel = (float) (std::exp (-0.5 * levelRate * behind) / std::sqrt (juce::jmax (1.0e-6, expected)));
+
+        probeOffset = base + (double) settings.spread * (lead + behind);
+    }
+    else
+    {
+        // Decay off: Spread interpolates from "exactly Time" to "anywhere in
+        // the buffer". Interpolating rather than clamping a random deviation
+        // is what keeps the distribution smooth instead of piling grains up
+        // at the limits.
+        const auto randomOffset = looseMin + rng.nextDouble() * (looseMax - looseMin);
+        probeOffset = base + (double) settings.spread * (randomOffset - base);
+    }
+
+    // Chaos then pushes the result around on its own slow clock.
+    probeOffset = juce::jlimit (looseMin, looseMax, probeOffset + settings.timeModSamples);
 
     // The audio this grain is about to play has an age; the Lifetime curves
     // shape the grain from it before anything else is decided.
@@ -614,7 +693,10 @@ void GrainEngine::spawnScheduledGrain (const Settings& settings)
 
     const auto offset   = juce::jlimit (minOffset, maxOffset, probeOffset);
     const auto startPos = (double) writePos - offset + (reversed ? span : 0.0);
-    activateGrain (startPos, reversed ? -rate : rate, settings, shape, 1.0f, ageSeconds);
+    // The gate belongs to the spread part of the trip: at Spread 0 every
+    // grain reads at Time and the whole loss is the loop's (decay::resolve).
+    const auto gate = 1.0f + juce::jmin (1.0f, settings.spread * 4.0f) * (gateLevel - 1.0f);
+    activateGrain (startPos, reversed ? -rate : rate, settings, shape, gate, ageSeconds);
 }
 
 void GrainEngine::spawnBurstGrain (const Settings& settings)
@@ -739,7 +821,8 @@ void GrainEngine::process (const float* const* input,
     const auto writeStep   = settings.freezeFadeSamples >= 1.0
                            ? (float) (1.0 / settings.freezeFadeSamples) : 1.0f;
 
-    feedbackSmoothed.setTargetValue (settings.feedback);
+    feedbackSmoothed.setTargetValue (settings.feedback * settings.loopGain);
+    wetGainSmoothed.setTargetValue (settings.wetGain);
 
     if (rewindRequested)
     {
@@ -934,8 +1017,9 @@ void GrainEngine::process (const float* const* input,
                 writePos = 0;
         }
 
+        const auto wetGain = wetGainSmoothed.getNextValue();
         for (int channel = 0; channel < numChannels; ++channel)
-            wet[channel][i] = sum[juce::jmin (channel, 1)];
+            wet[channel][i] = sum[juce::jmin (channel, 1)] * wetGain;
     }
 
     averageAgeSeconds.store (blockWeightSum > 1.0e-9 ? (float) (blockAgeSum / blockWeightSum) : 0.0f,

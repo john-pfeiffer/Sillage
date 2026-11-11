@@ -41,13 +41,19 @@ The plugin opens on the **Main** page: nine knobs that read like a reverb or del
 presets, a **Type** selector, **Freeze**, the **Wake** mode and the Randomize / Panic /
 Rewind buttons.
 
-**Decay** is how long anything lives in the tail (an RT60: −60 dB at Decay, whatever
-Feedback says) and how far back **Spread** may read. Turned all the way up it reads **Off**
-and Feedback alone decides, which is how a delay behaves. Between them the two knobs are the
-whole delay-to-reverb continuum: Spread 0 is an echo at Time, Spread 100 is a cloud filling
-the Decay window, and in between is an echo with a tail growing behind it. Feedback is the
-build-up; Decay is the length. A 250 ms Decay at Spread 100 on 100 %-wet drums is a room that
-keeps the hit.
+**Decay** is how long the tail lasts (an RT60: −60 dB at Decay) and **Feedback** is how
+much of that tail the loop rebuilds. At Feedback 0 the tail is one pass of grains over the
+Decay window; as Feedback rises that pass gets shorter and the loop regenerates the rest, so
+the tail stays about Decay long while more of it goes through Damping, Shimmer and
+everything else on the Feedback tab. Above 100 % the loop wins and the tail outlasts Decay,
+up to holding on the limiter. Turned all the way up Decay reads **Off** and Feedback alone
+decides, which is how a plain delay behaves.
+
+**Time** is when the sound arrives and **Spread** grows a cloud behind it: Spread 0 is an
+echo at Time, Spread 100 is a cloud with Time as its pre-delay, and in between is an echo
+with a tail behind it. Between them the two knobs are the whole delay-to-reverb continuum,
+and the wet stays at the level of what went in across all of it. A 250 ms Decay at Spread
+100 on 100 %-wet drums is a room that keeps the hit.
 
 **Type** is a quick start, like a reverb's algorithm selector: Delay, Room, Reverb, Shimmer,
 Wash or Granular sets every parameter to a tuned starting point for that character (leaving
@@ -67,15 +73,15 @@ Every parameter is exposed to host automation (EVS standard).
 
 | Section | Parameter | Range | Notes |
 |---|---|---|---|
-| Grain | Time | 1–4000 ms | Base read offset behind the write head |
+| Grain | Time | 1–4000 ms | When the sound arrives: the echo at Spread 0, the cloud's pre-delay at Spread 100 |
 | Grain | Time Sync | on / off | Take Time from the host tempo instead |
 | Grain | Division | 1/64T – 1 bar | 19 divisions incl. dotted and triplet; the bar follows the host time signature |
 | Grain | Density | 0.5–500 /s | Low = discrete echoes, high = continuous wash |
-| Grain | Decay | 50 ms – 30 s / Off | How long audio may live in the tail (−60 dB at Decay) and how far back Spread reads. Off = Feedback alone decides |
-| Grain | Spread | 0–100 % | 0 = every grain lands at Time (a delay), 100 = reads scattered across the Decay window (a reverb) |
+| Grain | Decay | 50 ms – 30 s / Off | How long the tail lasts (−60 dB at Decay) and how far behind Time Spread reads. Off = Feedback alone decides and Spread reads the whole buffer |
+| Grain | Spread | 0–100 % | 0 = every grain lands at Time (a delay), 100 = reads scattered behind Time across the Decay window (a reverb) |
 | Grain | Size | 2–2000 ms | Grain length |
 | Grain | Window | Hann / Trapezoid / Tukey / Expo-decay | Grain envelope |
-| Grain | Feedback | 0–120 % | Above 100 % is intentional; the loop limiter keeps it musical |
+| Grain | Feedback | 0–120 % | How much of the tail the loop rebuilds (with Decay Off: the plain loop gain). Above 100 % is intentional; the loop limiter keeps it musical |
 | Pitch | Pitch | ±24 st | Per-grain playback rate |
 | Pitch | Pitch Fine | ±100 ct | |
 | Pitch | Pitch Spread | 0–100 % | Random per-grain pitch deviation |
@@ -112,7 +118,7 @@ Every parameter is exposed to host automation (EVS standard).
 | Output | Panic | momentary | Clears every buffer and grain instantly (automatable) |
 | Age | Age On | on / off | Stage switch for per-pass Degrade and the Lifetime Curves (Decay is not part of it) |
 | Age | Lifetime | 100 ms – 30 s | Age is normalised against this for the Lifetime Curves |
-| Age | Bits/pass, SR/pass, Noise/pass, LP tilt/pass | 0–2 bit, 0–10 %, 0–100 %, 0–500 Hz | Per-pass Degrade: driven by the audio's age, so it compounds every time round (floors: 4-bit, 4 kHz, 200 Hz) |
+| Age | Bits/pass, SR/pass, Noise/pass, LP tilt/pass | 0–6 bit, 0–40 %, 0–100 %, 0–500 Hz | Per-pass Degrade: driven by the audio's age over the length of one trip round the loop, so it compounds every time round (floors: 4-bit, 4 kHz, 200 Hz) |
 | Age | Drift/pass, Drift Dir | 0–50 ct, Up / Down / Random | Pitch drift in the loop; Random re-draws its direction every pass |
 | Age | Curve: LP cutoff … Level | on / off ×9 | Enables a Lifetime Curve per destination (LP, HP, Bit depth, Sample rate, Grain size, Pitch offset, Reverse, Pan spread, Level). Curve shapes are drawn in the editor and saved with the session |
 | Rewind | Rewind | on / off | Continuously captures the wet tail |
@@ -141,9 +147,11 @@ never delayed, and reported latency stays 0.
 Every buffer sample carries its **Age** in seconds in a parallel buffer, so a grain knows
 how old the audio it plays is, per-pass Degrade compounds with that age, and the Lifetime
 Curves shape each grain from its own age (global destinations use the average age of the
-live grains). Decay is an age gate on top of that (a grain's level falls by 60 dB at Decay)
-and the bound on Spread's reach. Loudness compensation blends from coherent at Spread 0 to incoherent at
-Spread 100, so Feedback means the same thing across the whole delay-to-reverb range.
+live grains). Decay does not work by age: it is a loss per trip through the buffer, shared
+between how often old audio is read and how loud it is when it is, with the loop's gain set
+so the summed tail still reaches −60 dB at Decay (`src/DecayModel.h`). Loudness compensation
+follows each window shape's own mean and mean square and how far apart Spread really puts
+the reads, so Feedback, Spread, Density and Size are not volume controls.
 
 **Modulation sources:** Age (grain) — a grain's own age over Lifetime, resolved per grain
 for the per-grain destinations (Size, Pitch, Pitch Spread, Pan Spread, Reverse) and as the
