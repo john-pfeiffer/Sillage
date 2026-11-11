@@ -46,7 +46,11 @@ SillagePanel::SillagePanel (SillageAudioProcessor& p)
     // prompt so picking the same one again works too.
     typeBox.setTextWhenNothingSelected ("Type...");
     for (int t = 0; t < types::kNumTypes; ++t)
+    {
+        if (t == types::kFirstCharacterType)
+            typeBox.addSeparator();
         typeBox.addItem (types::kTypeNames[(size_t) t], t + 1);
+    }
     typeBox.onChange = [this] { applyType(); };
     addAndMakeVisible (typeBox);
 

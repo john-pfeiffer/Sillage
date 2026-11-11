@@ -372,6 +372,39 @@ double tonePower (const std::vector<float>& channel, double hz, size_t begin, si
     return (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (n * n);
 }
 
+// The share of a stretch's energy that lies between two frequencies, by a
+// plain DFT over just those bins.
+double bandShare (const std::vector<float>& channel, double lowHz, double highHz, size_t begin, size_t end)
+{
+    const auto last = std::min (end, channel.size());
+    if (last <= begin + 16)
+        return 0.0;
+
+    const auto n = last - begin;
+    double total = 0.0;
+    for (size_t i = begin; i < last; ++i)
+        total += (double) channel[i] * channel[i];
+    if (total <= 1.0e-18)
+        return 0.0;
+
+    const auto binHz = kSampleRate / (double) n;
+    double band = 0.0;
+    for (auto bin = (int) std::ceil (lowHz / binHz); (double) bin * binHz <= highHz; ++bin)
+    {
+        const auto step = juce::MathConstants<double>::twoPi * (double) bin / (double) n;
+        const auto coeff = 2.0 * std::cos (step);
+        double s1 = 0.0, s2 = 0.0;
+        for (size_t i = begin; i < last; ++i)
+        {
+            const auto s0 = (double) channel[i] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        band += 2.0 * (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (double) n;
+    }
+    return band / total;
+}
+
 // How bright a stretch of audio is: the power of its first difference over
 // its own power. Rises with high-frequency content, independent of level.
 double brightness (const std::vector<float>& channel, size_t begin, size_t end)
@@ -1831,7 +1864,7 @@ void testTypesGiveUsableStartingPoints()
         setParam (*p, params::id::mix, 64.0f);
         setParam (*p, params::id::output, -3.0f);
         setParam (*p, params::id::wakeMode, 1.0f);
-        setParam (*p, params::id::chokeOn, 1.0f); // something a Type must reset
+        setParam (*p, params::id::rewindOn, 1.0f); // something a Type must reset
         types::apply (*p, type);
 
         const bool untouched = std::abs (getParam (*p, params::id::mix) - 64.0f) < 0.01f
@@ -1839,7 +1872,7 @@ void testTypesGiveUsableStartingPoints()
                             && getParam (*p, params::id::wakeMode) >= 0.5f
                             && getParam (*p, params::id::freeze) < 0.5f;
         check (untouched, (name + ": leaves Mix, Output, Freeze and Wake alone").toRawUTF8());
-        check (getParam (*p, params::id::chokeOn) < 0.5f, (name + ": resets what it does not set").toRawUTF8());
+        check (getParam (*p, params::id::rewindOn) < 0.5f, (name + ": resets what it does not set").toRawUTF8());
         check (p->getPresetName() == name, (name + ": names the preset after itself").toRawUTF8());
 
         setParam (*p, params::id::mix, 100.0f);
@@ -2365,6 +2398,92 @@ void testUndoRestoresTheWholeState()
     check (steps == SillageAudioProcessor::kUndoDepth, "undo: keeps the last sixteen steps");
 }
 
+// The six character Types each stand on one thing only Sillage does. Take
+// that thing away and the Type has to sound different, or it is a preset of
+// settings nobody can hear.
+void testCharacterTypesAreHeard()
+{
+    // Renders a Type fully wet, with optional changes, and measures the tail.
+    using Changes = std::vector<std::pair<const char*, float>>;
+    using Measure = std::function<double (const Audio&)>;
+
+    const auto measure = [] (types::Type type, const Changes& changes, const Generator& input,
+                             double seconds, const Measure& feature)
+    {
+        double sum = 0.0;
+        constexpr int renders = 6; // grains, Chaos and reversal are all random
+        for (int r = 0; r < renders; ++r)
+        {
+            auto p = makeProcessor();
+            types::apply (*p, type);
+            setParam (*p, params::id::mix, 100.0f);
+            for (const auto& [id, value] : changes)
+                setParam (*p, id, value);
+
+            Audio out;
+            render (*p, seconds, input, out);
+            if (! allFinite (out) || peakSeconds (out, 0.0, seconds) > 8.0f)
+                return -1.0;
+            sum += feature (out);
+        }
+        return sum / renders;
+    };
+
+    const auto tone = toneThenSilence (220.0, 0.8);
+
+    // The share of the tail's energy around a pitch.
+    const auto shareAround = [] (double hz, double from, double to)
+    {
+        return [=] (const Audio& out) { return bandShare (out[0], hz * 0.92, hz * 1.08, atSecond (from), atSecond (to)); };
+    };
+
+    {
+        const auto with    = measure (types::Type::cascade, {}, tone, 2.0, shareAround (440.0, 0.9, 1.8));
+        const auto without = measure (types::Type::cascade, { { params::id::shimmerAmount, 0.0f } }, tone, 2.0, shareAround (440.0, 0.9, 1.8));
+        std::printf ("       Cascade: share of the tail an octave above the note %.3f, %.4f without Shimmer\n", with, without);
+        check (with > 0.02 && with > without * 5.0, "Cascade: the tail climbs an octave, and only because of Shimmer");
+    }
+    {
+        const auto with    = measure (types::Type::undertow, {}, tone, 2.0, shareAround (110.0, 0.9, 1.8));
+        const auto without = measure (types::Type::undertow, { { params::id::shimmerAmount, 0.0f } }, tone, 2.0, shareAround (110.0, 0.9, 1.8));
+        std::printf ("       Undertow: share of the tail an octave below the note %.3f, %.4f without Shimmer\n", with, without);
+        check (with > 0.02 && with > without * 5.0, "Undertow: the tail sinks an octave, and only because of Shimmer");
+    }
+    {
+        const auto with    = measure (types::Type::shards, {}, tone, 2.0, shareAround (220.0, 0.9, 1.8));
+        const auto without = measure (types::Type::shards, { { params::id::pitchSpread, 0.0f } }, tone, 2.0, shareAround (220.0, 0.9, 1.8));
+        std::printf ("       Shards: share of the tail still on the note %.3f, %.3f without Pitch Spread\n", with, without);
+        check (with >= 0.0 && with < without * 0.75, "Shards: Pitch Spread scatters the note across the scale");
+    }
+    {
+        const auto with    = measure (types::Type::swarm, {}, tone, 2.0, shareAround (220.0, 0.9, 1.8));
+        const auto without = measure (types::Type::swarm, { { params::id::chaos, 0.0f }, { params::id::pitchSpread, 0.0f } }, tone, 2.0, shareAround (220.0, 0.9, 1.8));
+        std::printf ("       Swarm: share of the tail still on the note %.3f, %.3f without Chaos and Pitch Spread\n", with, without);
+        check (with >= 0.0 && with < without * 0.75, "Swarm: Chaos and Pitch Spread pull the tail off the note");
+    }
+    {
+        const Changes clean { { params::id::degradeBits, 0.0f }, { params::id::degradeRate, 0.0f },
+                              { params::id::degradeTilt, 0.0f }, { params::id::degradeNoise, 0.0f } };
+        const auto with    = measure (types::Type::rot, {}, tone, 4.5, shareAround (220.0, 3.0, 4.5));
+        const auto without = measure (types::Type::rot, clean, tone, 4.5, shareAround (220.0, 3.0, 4.5));
+        std::printf ("       Rot: share of the late repeats still on the note %.3f, %.3f without Degrade\n", with, without);
+        check (with >= 0.0 && with < without * 0.75, "Rot: the repeats fall apart as they go round");
+    }
+    {
+        // One 20 ms hit; Retrigger plays it back in sixteenths.
+        const Generator hit = [] (int64_t i, int)
+        {
+            const auto t = (double) i / kSampleRate;
+            return t >= 0.5 && t < 0.52 ? sine (i, 1000.0) * 0.5f : 0.0f;
+        };
+        const auto after = [] (const Audio& out) { return rms (out[0], atSecond (0.56), atSecond (1.2)); };
+        const auto with    = measure (types::Type::stutter, {}, hit, 1.5, after);
+        const auto without = measure (types::Type::stutter, { { params::id::retriggerOn, 0.0f } }, hit, 1.5, after);
+        std::printf ("       Stutter: level after one hit %.4f, %.4f without Retrigger\n", with, without);
+        check (with > 0.0 && with > without * 1.5, "Stutter: Retrigger repeats the hit");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2439,6 +2558,8 @@ int main()
     testLoopColoursTheTailWithDecayOn();
     testTypesSitAtTheDryLevel();
     testDelayTypeRepeatsAtUnity();
+
+    testCharacterTypesAreHeard();
 
     testRandomizeStaysAudible();
     testUndoRestoresTheWholeState();

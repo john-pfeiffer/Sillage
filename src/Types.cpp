@@ -70,8 +70,79 @@ const std::vector<Override>& overridesFor (Type type)
         { id::pitchSpread, 20.0f }, { id::reverse, 30.0f }, { id::chaos, 25.0f },
     };
 
+    // Scale index 4 is Pentatonic; saturation 1 is Hard, 2 is Fold; drift
+    // direction 1 is Down; division 7 is 1/16, 10 is 1/8.
+
+    // Short plucked grains scattered over two octaves of a pentatonic scale,
+    // half of them backwards.
+    static const std::vector<Override> shardsTable {
+        { id::time, 180.0f }, { id::decay, 3500.0f }, { id::density, 28.0f }, { id::spread, 70.0f },
+        { id::size, 45.0f }, { id::window, 3.0f }, { id::feedback, 65.0f }, { id::panSpread, 100.0f },
+        { id::fbHighpass, 180.0f }, { id::fbLowpass, 11000.0f }, { id::diffuse, 20.0f },
+        { id::pitchSpread, 60.0f }, { id::quantize, 4.0f }, { id::reverse, 50.0f },
+        { id::width, 140.0f },
+    };
+
+    // Nearly all of the tail goes round the loop, and every trip is an
+    // octave up: the tail climbs out of what was played.
+    static const std::vector<Override> cascadeTable {
+        { id::time, 40.0f }, { id::decay, 6000.0f }, { id::density, 160.0f }, { id::spread, 100.0f },
+        { id::size, 70.0f }, { id::window, 0.0f }, { id::feedback, 92.0f }, { id::panSpread, 90.0f },
+        { id::fbHighpass, 250.0f }, { id::fbLowpass, 9000.0f }, { id::diffuse, 70.0f },
+        { id::shimmerInterval, 6.0f }, { id::shimmerAmount, 60.0f }, { id::shimmerFine, 6.0f },
+        { id::width, 140.0f },
+    };
+
+    // The same loop pointed down: an octave lower each trip, drifting flat
+    // and losing its top as it goes.
+    static const std::vector<Override> undertowTable {
+        { id::time, 60.0f }, { id::decay, 7000.0f }, { id::density, 120.0f }, { id::spread, 100.0f },
+        { id::size, 120.0f }, { id::window, 2.0f }, { id::feedback, 90.0f }, { id::panSpread, 80.0f },
+        { id::fbHighpass, 40.0f }, { id::fbLowpass, 3500.0f }, { id::diffuse, 60.0f },
+        { id::shimmerInterval, 0.0f }, { id::shimmerAmount, 55.0f },
+        { id::degradeDrift, 12.0f }, { id::degradeDriftDir, 1.0f }, { id::degradeTilt, 80.0f },
+        { id::lifetime, 5000.0f },
+    };
+
+    // Repeats that fall apart: fewer bits, a lower sample rate and less top
+    // every time round, through a hard clip.
+    static const std::vector<Override> rotTable {
+        { id::time, 330.0f }, { id::decay, 5000.0f }, { id::density, 25.0f }, { id::spread, 12.0f },
+        { id::size, 80.0f }, { id::window, 0.0f }, { id::feedback, 88.0f }, { id::panSpread, 30.0f },
+        { id::fbHighpass, 120.0f }, { id::fbLowpass, 9000.0f }, { id::diffuse, 0.0f },
+        { id::degradeBits, 4.0f }, { id::degradeRate, 25.0f }, { id::degradeTilt, 250.0f },
+        { id::degradeNoise, 20.0f }, { id::drive, 30.0f }, { id::satType, 1.0f },
+    };
+
+    // Every hit is caught and repeated in sixteenths, and cuts off what the
+    // last one left.
+    static const std::vector<Override> stutterTable {
+        { id::timeSync, 1.0f }, { id::timeDivision, 10.0f }, { id::sync, 1.0f }, { id::grainDivision, 7.0f },
+        { id::decay, 1200.0f }, { id::spread, 0.0f }, { id::size, 70.0f }, { id::window, 1.0f },
+        { id::feedback, 40.0f }, { id::panSpread, 40.0f }, { id::fbHighpass, 150.0f }, { id::fbLowpass, 10000.0f },
+        { id::sensitivity, 60.0f }, { id::retriggerOn, 1.0f }, { id::retriggerCount, 6.0f },
+        { id::retriggerDivision, 7.0f }, { id::retriggerAmount, 100.0f },
+        { id::chokeOn, 1.0f }, { id::chokeAmount, 70.0f }, { id::chokeFade, 20.0f },
+    };
+
+    // A dense cloud of tiny grains that Chaos keeps moving: position, pitch,
+    // density and feedback all wander.
+    static const std::vector<Override> swarmTable {
+        { id::time, 120.0f }, { id::decay, 4000.0f }, { id::density, 220.0f }, { id::spread, 85.0f },
+        { id::size, 25.0f }, { id::window, 0.0f }, { id::feedback, 75.0f }, { id::panSpread, 100.0f },
+        { id::fbHighpass, 150.0f }, { id::fbLowpass, 12000.0f }, { id::diffuse, 30.0f },
+        { id::chaos, 70.0f }, { id::pitchSpread, 35.0f }, { id::reverse, 20.0f }, { id::envDensity, 50.0f },
+        { id::width, 160.0f },
+    };
+
     switch (type)
     {
+        case Type::shards:   return shardsTable;
+        case Type::cascade:  return cascadeTable;
+        case Type::undertow: return undertowTable;
+        case Type::rot:      return rotTable;
+        case Type::stutter:  return stutterTable;
+        case Type::swarm:    return swarmTable;
         case Type::room:     return roomTable;
         case Type::reverb:   return reverbTable;
         case Type::shimmer:  return shimmerTable;

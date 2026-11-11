@@ -15,13 +15,26 @@ class SillageAudioProcessor;
 namespace types
 {
 
-enum class Type { delay = 0, room, reverb, shimmer, wash, granular, count };
+// The first six read like a reverb's algorithms. The second six are the
+// other half of the plugin: each one is built on something only Sillage does
+// (pitched and reversed grains, a loop that stacks or sinks or rots, bursts
+// on the hit, Chaos), so there is a way to hear it without building it.
+enum class Type
+{
+    delay = 0, room, reverb, shimmer, wash, granular,
+    shards, cascade, undertow, rot, stutter, swarm,
+    count
+};
 
 inline constexpr int kNumTypes = (int) Type::count;
 
 inline constexpr std::array<const char*, kNumTypes> kTypeNames {
-    "Delay", "Room", "Reverb", "Shimmer", "Wash", "Granular"
+    "Delay", "Room", "Reverb", "Shimmer", "Wash", "Granular",
+    "Shards", "Cascade", "Undertow", "Rot", "Stutter", "Swarm"
 };
+
+// The first of the second six: the editor's list has a divider before it.
+inline constexpr int kFirstCharacterType = (int) Type::shards;
 
 // Message thread only.
 void apply (SillageAudioProcessor& processor, Type type);

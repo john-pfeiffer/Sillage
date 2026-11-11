@@ -55,10 +55,28 @@ with a tail behind it. Between them the two knobs are the whole delay-to-reverb 
 and the wet stays at the level of what went in across all of it. A 250 ms Decay at Spread
 100 on 100 %-wet drums is a room that keeps the hit.
 
-**Type** is a quick start, like a reverb's algorithm selector: Delay, Room, Reverb, Shimmer,
-Wash or Granular sets every parameter to a tuned starting point for that character (leaving
-Mix, Output, Freeze and Wake mode alone) and names the preset after itself. The main knobs are
-then yours to move.
+**Type** is a quick start, like a reverb's algorithm selector. Choosing one sets every
+parameter to a tuned starting point (leaving Mix, Output, Freeze and Wake mode alone) and
+names the preset after itself; the main knobs are then yours to move. Six read like a
+reverb's algorithms: Delay, Room, Reverb, Shimmer, Wash, Granular. Six are the other half of
+the plugin, each built on something only Sillage does:
+
+- **Shards** — short plucked grains scattered over a pentatonic scale, half of them reversed.
+- **Cascade** — nearly all of the tail goes round the loop and every trip is an octave up.
+- **Undertow** — the same loop pointed down: an octave lower each trip, drifting flat, going dark.
+- **Rot** — repeats that lose bits, sample rate and top every time round.
+- **Stutter** — every hit is caught and repeated in sixteenths, cutting off the last one.
+- **Swarm** — a dense cloud of tiny grains that Chaos keeps moving.
+
+Every Type's wet sits within a few dB of what went in, so switching Types is not a volume
+change.
+
+**Randomize** rolls everything except Mix, Output, Freeze, Wake mode and the stage switches.
+The slider beside it is how far: 100 % is a new sound, 20 % is "like this, but different".
+A roll is not uniform — each parameter has a range a roll may land in, the stage features
+are mostly off, and a few combinations that would only give silence are repaired — so
+nearly every roll is something to listen to. **Undo** and **Redo** step back and forth over
+the last sixteen Randomize, Type, Init and Load actions.
 
 Everything else lives on the tabs — **Grain**, **Feedback**, **Transients**, **Age**,
 **Rewind & Chaos**, **Mod**, **Output** — and none of it needs touching to use the plugin.
@@ -105,7 +123,7 @@ Every parameter is exposed to host automation (EVS standard).
 | Freeze & Chaos | Freeze Fade | 0–2000 ms | Crossfades into and out of Freeze so it never clicks |
 | Freeze & Chaos | Chaos On | on / off | Stage switch for Chaos |
 | Freeze & Chaos | Chaos | 0–100 % | Smoothed-random drift of read position, pitch, feedback (up to +30 %), density (±50 %) and shimmer detune; the loop limiter is what keeps 100 % musical |
-| Freeze & Chaos | Randomize Amt | 0–100 % | 100 = full reroll, 20 = a nudge. Randomize never touches Mix, Output, Freeze, Wake mode, Panic or the stage switches |
+| Freeze & Chaos | Randomize Amt | 0–100 % | The slider beside Randomize: 100 = full reroll, 20 = a nudge. Randomize never touches Mix, Output, Freeze, Wake mode, Panic or the stage switches, and never aims a mod slot at Mix |
 | Transients | Transients On | on / off | Stage switch for Retrigger, Duck, Choke, Env > and Displace |
 | Transients | Sensitivity | 0–100 % | Spectral-flux onset detector on the input; the Hit indicator shows detections |
 | Transients | Retrigger, Burst Count, Burst Rate, Burst Div, Burst Amt, Burst Offset | 1–16, 10–1000 ms / division, 0–100 %, 0–100 ms | A hit fires a burst of grains that all read the hit itself — a stutter, not a smear. Rate follows Sync |

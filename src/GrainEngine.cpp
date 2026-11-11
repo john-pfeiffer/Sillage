@@ -105,7 +105,7 @@ constexpr double kStealFadeSeconds = 0.002;
 constexpr double kRewindFadeSeconds = 0.02;
 
 // The most a grain in a sparse cloud is raised to keep the cloud's level.
-constexpr double kMaxSparseMakeup = 3.0;
+constexpr double kMaxSparseMakeup = 2.0;
 
 // Reads scattered by more than this no longer sum in phase.
 constexpr double kCoherentSeconds = 0.002;
