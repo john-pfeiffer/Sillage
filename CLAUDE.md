@@ -14,7 +14,13 @@
   FetchContent in `CMakeLists.txt`.
 - **Tests:** `tests/SillageTests.cpp` is a headless render harness run by CTest. Every
   DSP change needs a rendered-audio assertion, and the suite must pass in Release
-  before pushing.
+  before pushing. The grain scheduler is random, so assertions on a cloud average a few
+  renders and leave margin.
+- **Measuring:** `SillageProbe` (`tools/Probe.cpp`, `-DSILLAGE_BUILD_PROBE=ON`) prints each
+  Type's wet level and tail, what each main knob does across its range, tail length over
+  Decay × Spread × Feedback and Randomize's yield. Re-run it after any change to the
+  Decay model, the loudness compensation, a Type or a Randomize range. `SillageSnapshot`
+  (`tools/Snapshot.cpp`) renders the editor to PNG; `--play <Type>` runs audio through it.
 - **EVS standards:** every user-facing parameter host-automatable; resizable UI (the
   panel is laid out once at its 960 px design width and scaled as a whole, fixed aspect);
   pure-function UI (knobs look like knobs: an arc and a pointer, a switch is a dot that

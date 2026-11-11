@@ -114,3 +114,26 @@ if(SILLAGE_BUILD_SNAPSHOT_TOOL)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
 endif()
+
+# ---- Measurement probe (development only) -----------------------------------
+# Renders a phrase through the processor and prints levels, tail lengths and
+# Randomize's yield: what the Types, the Decay model and Randomize were tuned
+# against. See the usage notes at the top of tools/Probe.cpp.
+option(SILLAGE_BUILD_PROBE "Build the measurement probe" OFF)
+if(SILLAGE_BUILD_PROBE)
+    juce_add_console_app(SillageProbe PRODUCT_NAME "SillageProbe")
+    target_sources(SillageProbe PRIVATE
+        tools/Probe.cpp
+        ${SILLAGE_SOURCES})
+    target_include_directories(SillageProbe PRIVATE src)
+    target_compile_definitions(SillageProbe PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_MODAL_LOOPS_PERMITTED=0
+        JUCE_STANDALONE_APPLICATION=1)
+    target_link_libraries(SillageProbe PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+endif()

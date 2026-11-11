@@ -261,3 +261,9 @@ Setup runs and the installer after, SHA-256 with an RFC 3161 timestamp.
   the editor to PNG. `--off` turns the stage switches off first, to check the greyed-out
   state; `--play <Type>` applies a Type and runs a phrase through the plugin while the
   editor's timers tick, so the tail, the meters and the mod markers have something to show.
+- Measuring without a DAW: configure with `-DSILLAGE_BUILD_PROBE=ON` and run `SillageProbe`.
+  It renders a phrase through the processor and prints each Type's wet level and tail
+  (`types`), what each main knob does across its range (`sweep <type>`), tail length over
+  Decay × Spread × Feedback (`rt60 <type>`) and how many Randomize rolls are usable
+  (`randomize`). The Types, the Decay model and Randomize's ranges were tuned against it;
+  the usage notes are at the top of `tools/Probe.cpp`.
