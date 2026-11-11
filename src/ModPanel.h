@@ -6,7 +6,7 @@
 
 // Modulation panel (5.9): six slot rows (Source, Destination, Amount, Curve),
 // two LFO rows and the Transient decay — a table, not a matrix, so every
-// routing is visible at once. Pure-function: stock combos, sliders, toggles.
+// routing is visible at once, with every column and slider named.
 class ModPanel : public juce::Component
 {
 public:
@@ -18,9 +18,10 @@ public:
     static constexpr int kRowH      = 26;
     static constexpr int kRowGap    = 4;
     static constexpr int kMinWidth  = 640;
+    static constexpr int kHeaderH   = 18;
     static int requiredHeight() noexcept
     {
-        return (params::id::kNumModSlots + params::id::kNumLfos + 1) * (kRowH + kRowGap);
+        return kHeaderH + (params::id::kNumModSlots + params::id::kNumLfos + 1) * (kRowH + kRowGap);
     }
 
 private:
@@ -37,7 +38,7 @@ private:
 
     struct LfoRow
     {
-        juce::Label        name;
+        juce::Label        name, rateLabel, phaseLabel;
         juce::ComboBox     shape, division;
         juce::Slider       rate  { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
         juce::Slider       phase { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
@@ -48,6 +49,7 @@ private:
     };
 
     SillageAudioProcessor& processor;
+    std::array<juce::Label, 4> headers; // Source, Destination, Amount, Curve
     std::array<Slot, params::id::kNumModSlots> slots;
     std::array<LfoRow, params::id::kNumLfos> lfos;
 

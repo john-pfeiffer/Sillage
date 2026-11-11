@@ -61,6 +61,9 @@ public:
 
     float getAverageAgeSeconds() const noexcept { return averageAgeSeconds.load (std::memory_order_relaxed); }
     int   getActiveGrainCount() const noexcept;
+
+    // The loop limiter's gain on the shared tail (1 = idle), for the meter.
+    float getLimiterGain() const noexcept;
     int   getActiveInstanceCount() const noexcept { return activeInstances.load (std::memory_order_relaxed); }
     bool  isFrozen() const noexcept;
 

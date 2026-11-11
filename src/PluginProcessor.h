@@ -56,6 +56,22 @@ public:
     // True once Freeze has fully engaged.
     bool isFrozen() const noexcept { return wake.isFrozen(); }
 
+    // What the editor draws from. Peaks are the highest since the last read:
+    // the audio thread only ever raises them, the editor takes and clears.
+    struct Meter
+    {
+        float input = 0.0f, wet = 0.0f, output = 0.0f; // linear peak
+        float limiterGain = 1.0f;                      // below 1 while the loop limiter works
+    };
+    Meter takeMeter() noexcept;
+
+    // The normalised offset the mod slots are putting on a parameter right
+    // now (0 when nothing is), for the marker on its knob.
+    float getModOffset (const juce::String& parameterId) const noexcept;
+
+    // The Decay model as the knobs stand, without modulation, for the editor.
+    decay::Model getDecayModelForDisplay() const;
+
     // Age (5.6) of what the live grains are playing, in seconds and against
     // Lifetime.
     float getAverageAgeSeconds() const noexcept { return wake.getAverageAgeSeconds(); }
@@ -159,6 +175,9 @@ private:
 
     // Post-loop wet stage (5.11): HP/LP, then Width, ahead of Mix.
     juce::dsp::StateVariableTPTFilter<float> wetHighpass, wetLowpass;
+
+    std::atomic<float> meterInput { 0.0f }, meterWet { 0.0f }, meterOutput { 0.0f }, meterLimiter { 1.0f };
+    std::array<std::atomic<float>, mod::kNumDestinations> publishedModOffsets {};
 
     void restoreState (const juce::ValueTree& state);
     std::vector<juce::ValueTree> undoStack, redoStack;

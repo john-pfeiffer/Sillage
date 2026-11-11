@@ -147,6 +147,41 @@ void SillageAudioProcessor::resetToDefaults()
     setPresetName ("Init");
 }
 
+// ---- What the editor reads ---------------------------------------------------
+
+SillageAudioProcessor::Meter SillageAudioProcessor::takeMeter() noexcept
+{
+    Meter meter;
+    meter.input       = meterInput.exchange (0.0f);
+    meter.wet         = meterWet.exchange (0.0f);
+    meter.output      = meterOutput.exchange (0.0f);
+    meter.limiterGain = meterLimiter.exchange (1.0f);
+    return meter;
+}
+
+float SillageAudioProcessor::getModOffset (const juce::String& parameterId) const noexcept
+{
+    for (int d = 1; d < mod::kNumDestinations; ++d)
+        if (const auto* id = mod::destinationParameterId ((mod::Destination) d))
+            if (parameterId == id)
+                return publishedModOffsets[(size_t) d].load (std::memory_order_relaxed);
+    return 0.0f;
+}
+
+decay::Model SillageAudioProcessor::getDecayModelForDisplay() const
+{
+    const auto decayMs = parameterValue (params::id::decay);
+    auto timeSeconds = (double) parameterValue (params::id::time) * 0.001;
+    if (parameterValue (params::id::timeSync) >= 0.5f)
+        timeSeconds = params::divisionSeconds ((int) parameterValue (params::id::timeDivision),
+                                               effectiveBpm.load(), barBeats.load());
+
+    return decay::resolve (params::decayIsOff (decayMs) ? 0.0 : (double) decayMs * 0.001, timeSeconds,
+                           (double) parameterValue (params::id::spread) * 0.01,
+                           (double) parameterValue (params::id::feedback) * 0.01,
+                           (double) parameterValue (params::id::size) * 0.001, kBufferSeconds);
+}
+
 // ---- Randomize and undo ------------------------------------------------------
 
 void SillageAudioProcessor::randomizeAll (float amount)
@@ -369,7 +404,11 @@ void SillageAudioProcessor::updateModulation (int numSamples, float envelope, in
     numAgeMods = 0;
 
     if (parameterValue (params::id::modOn) < 0.5f)
+    {
+        for (auto& published : publishedModOffsets)
+            published.store (0.0f, std::memory_order_relaxed);
         return; // the sources keep running so switching back on is seamless
+    }
 
     for (size_t s = 0; s < params::id::modSource.size(); ++s)
     {
@@ -390,6 +429,9 @@ void SillageAudioProcessor::updateModulation (int numSamples, float envelope, in
 
         modOffsets[(size_t) destination] += amount * mod::shape (sources.get (source), curve);
     }
+
+    for (size_t d = 0; d < modOffsets.size(); ++d)
+        publishedModOffsets[d].store (modOffsets[d], std::memory_order_relaxed);
 }
 
 // ---- Settings ----------------------------------------------------------------
@@ -679,6 +721,13 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         rewindThresholdArmed = false;
     }
 
+    const auto raise = [] (std::atomic<float>& meter, float value) noexcept
+    {
+        if (value > meter.load (std::memory_order_relaxed))
+            meter.store (value, std::memory_order_relaxed);
+    };
+    raise (meterInput, buffer.getMagnitude (0, numSamples));
+
     updateTransport();
     curveStore.copyTo (activeCurves);
     updateRewindTriggers (numSamples);
@@ -741,6 +790,10 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const auto duckDepth = parameterValue (params::id::duckDepth) * 0.01f;
     duck.setTimes (parameterValue (params::id::duckAttack), parameterValue (params::id::duckRelease));
 
+    raise (meterWet, wetBuffer.getMagnitude (0, numSamples));
+    if (const auto limiter = wake.getLimiterGain(); limiter < meterLimiter.load (std::memory_order_relaxed))
+        meterLimiter.store (limiter, std::memory_order_relaxed);
+
     int onsetIndex = 0;
 
     for (int i = 0; i < numSamples; ++i)
@@ -783,6 +836,8 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             data[i] = (data[i] * dryGain + wet[juce::jmin (channel, 1)] * wetGain) * outGain;
         }
     }
+
+    raise (meterOutput, buffer.getMagnitude (0, numSamples));
 }
 
 juce::AudioProcessorEditor* SillageAudioProcessor::createEditor()

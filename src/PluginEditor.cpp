@@ -3,16 +3,13 @@
 
 namespace
 {
-constexpr int kPad = 8, kTopBarH = 32, kTabBarH = 26;
-constexpr int kButtonW = 74, kSmallButtonW = 42, kIndicatorSize = 14, kPresetNameW = 96;
-constexpr int kTypeW = 92, kFreezeW = 58, kWakeW = 86, kAmountW = 56;
+constexpr int kPad = 8, kTopBarH = 34, kTabBarH = 28, kBarItemH = 24;
 constexpr int kCurveEditorH = 210, kCurveEditorMinW = 320;
 constexpr int kTimerHz = 30;
 constexpr int kMinWindowW = 640, kMaxWindowW = 2560;
 
-// One tab per group of sections. Parameters shown on the Main page or in the
-// top bar (Time + Sync, Decay, Spread, Feedback, Size, Loop LP, Shimmer Amt,
-// Width, Mix, Freeze, Wake) are not repeated here, so nothing has two controls.
+// One tab per group of cards. Parameters shown on the Main page or in the top
+// bar are not repeated here, so nothing has two controls.
 struct TabSpec
 {
     const char* name;
@@ -25,26 +22,33 @@ struct TabSpec
 SillagePanel::SillagePanel (SillageAudioProcessor& p)
     : processor (p), curveEditor (p), modPanel (p)
 {
+    setLookAndFeel (&lookAndFeel);
+    tooltips.setLookAndFeel (&lookAndFeel);
+
     buildPages();
     tabs.setTabBarDepth (kTabBarH);
     tabs.setOutline (0);
+    tabs.setIndent (0);
     addAndMakeVisible (tabs);
 
     presetName.setJustificationType (juce::Justification::centredLeft);
-    presetName.setFont (juce::FontOptions (13.0f));
+    presetName.setFont (ui::font (13.0f));
+    presetName.setMinimumHorizontalScale (0.75f);
     addAndMakeVisible (presetName);
     refreshPresetName();
 
     saveButton.onClick = [this] { savePreset(); };
     loadButton.onClick = [this] { loadPreset(); };
     initButton.onClick = [this] { processor.pushUndoState(); processor.resetToDefaults(); refreshPresetName(); };
+    initButton.setTooltip ("Every parameter and curve back to its default");
     addAndMakeVisible (saveButton);
     addAndMakeVisible (loadButton);
     addAndMakeVisible (initButton);
 
     // Type is an action: pick one, it applies, and the box goes back to its
     // prompt so picking the same one again works too.
-    typeBox.setTextWhenNothingSelected ("Type...");
+    typeBox.setTextWhenNothingSelected ("Type");
+    typeBox.setTooltip ("A tuned starting point. The second group are the ones only Sillage does");
     for (int t = 0; t < types::kNumTypes; ++t)
     {
         if (t == types::kFirstCharacterType)
@@ -55,22 +59,28 @@ SillagePanel::SillagePanel (SillageAudioProcessor& p)
     addAndMakeVisible (typeBox);
 
     freezeButton.setClickingTogglesState (true);
+    freezeButton.setTooltip ("Hold the buffer: the tail stays playable, nothing new gets in");
     freezeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
         processor.apvts, params::id::freeze, freezeButton);
     addAndMakeVisible (freezeButton);
 
     if (auto* choice = dynamic_cast<juce::AudioParameterChoice*> (processor.apvts.getParameter (params::id::wakeMode)))
         wakeBox.addItemList (choice->choices, 1);
+    wakeBox.setTooltip ("Wake: one Shared tail, or an Isolated tail for every hit");
     wakeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
         processor.apvts, params::id::wakeMode, wakeBox);
     addAndMakeVisible (wakeBox);
 
-    randomizeButton.onClick = [this] { randomize(); };
+    randomizeButton.onClick = [this]
+    {
+        processor.randomizeAll (processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f);
+    };
+    randomizeButton.setTooltip ("Roll everything except Mix, Output, Freeze, Wake and the stage switches");
+    addAndMakeVisible (randomizeButton);
 
     // How far a roll goes sits beside the button that rolls: 100 % is a new
     // sound, 20 % is "like this, but different".
-    randomizeAmount.setTextValueSuffix (" %");
-    randomizeAmount.setTooltip ("How far Randomize moves everything: 100 % is a full reroll, 20 % a nudge");
+    randomizeAmount.setTooltip ("How far Randomize goes: 100 % is a new sound, 20 % is like this but different");
     randomizeAmountAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.apvts, params::id::randomizeAmount, randomizeAmount);
     addAndMakeVisible (randomizeAmount);
@@ -78,73 +88,91 @@ SillagePanel::SillagePanel (SillageAudioProcessor& p)
     undoButton.onClick = [this] { processor.undo(); refreshPresetName(); };
     redoButton.onClick = [this] { processor.redo(); refreshPresetName(); };
     undoButton.setTooltip ("Step back over the last Randomize, Type, Init or Load");
+    redoButton.setTooltip ("Step forward again");
     addAndMakeVisible (undoButton);
     addAndMakeVisible (redoButton);
-    panicButton.onClick     = [this] { pulse (params::id::panic); };
-    rewindButton.onClick    = [this] { pulse (params::id::rewindManual); };
-    addAndMakeVisible (randomizeButton);
+
+    panicButton.onClick  = [this] { pulse (params::id::panic); };
+    rewindButton.onClick = [this] { pulse (params::id::rewindManual); };
+    panicButton.setTooltip ("Clear every buffer and grain now");
+    rewindButton.setTooltip ("Play the captured tail backwards into the loop. Needs Rewind on (Rewind & Chaos tab)");
     addAndMakeVisible (panicButton);
     addAndMakeVisible (rewindButton);
 
+    addAndMakeVisible (meter);
+
+    // Sliders build their value boxes when they are created, which was before
+    // they had this look: have them build again.
+    sendLookAndFeelChange();
+
     lastOnsetCount = processor.getOnsetCount();
+    timerCallback();
     startTimerHz (kTimerHz);
 }
 
 SillagePanel::~SillagePanel()
 {
     stopTimer();
+    tooltips.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
 }
 
 void SillagePanel::buildPages()
 {
     namespace id = params::id;
+    using ui::Condition;
 
-    const auto background = getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId);
+    const auto background = ui::colour::background;
 
-    mainPage = new MainPage (processor);
+    mainPage = new MainPage (processor, meterFeed);
     tabs.addTab ("Main", background, mainPage, true);
 
-    // Each stage tab leads with its On switch (the section gate) and marks the
-    // knob that turns the rest on (the master), so a dead stage looks dead.
+    // Rewind Trig indices: 0 Timer, 1 Transient, 2 Threshold, 3 Manual.
+    constexpr int kTimer = 0, kThreshold = 2;
+
+    // A card's `power` is its own switch (the dot at its top right) and its
+    // `gate` the stage it answers to. A control lists what else has to hold
+    // for it to be doing anything, so of two alternatives (a time in ms or a
+    // division under Sync) only the live one is lit.
     const std::vector<TabSpec> specs = {
         { "Grain", {
-            { "Grain", { id::density, id::window } },
-            { "Pitch", { id::pitch, id::pitchFine, id::pitchSpread, id::quantize, id::quantizeRoot,
-                         id::panSpread, id::reverse } } } },
+            { "Grain", { id::window } },
+            { "Pitch", { id::pitchFine, id::pitchSpread, id::quantize, { id::quantizeRoot, id::quantize },
+                         id::panSpread, id::reverse } },
+            { "Grain Sync", { id::grainDivision, id::swing }, nullptr, 0, 0, nullptr, id::sync } } },
         { "Feedback", {
-            { "Loop", { id::loopOn, id::diffuse, id::drive, { id::satType, id::drive },
+            { "Loop", { id::diffuse, id::drive, { id::satType, id::drive },
                         id::fbHighpass, id::fbResonance,
                         { id::shimmerInterval, id::shimmerAmount }, { id::shimmerFine, id::shimmerAmount } },
-              nullptr, 0, 0, id::loopOn },
-            { "Sync", { id::sync, { id::grainDivision, id::sync }, { id::swing, id::sync } } } } },
+              nullptr, 0, 0, id::loopOn, id::loopOn } } },
         { "Transients", {
-            { "Transients", { id::transientsOn, id::sensitivity }, nullptr, 0, 0, id::transientsOn },
-            { "Retrigger", { id::retriggerOn,
-                             { id::retriggerCount, id::retriggerOn }, { id::retriggerRate, id::retriggerOn },
-                             { id::retriggerDivision, id::retriggerOn }, { id::retriggerAmount, id::retriggerOn },
-                             { id::retriggerOffset, id::retriggerOn } },
-              nullptr, 0, 0, id::transientsOn },
-            { "Duck", { id::duckOn, { id::duckDepth, id::duckOn }, { id::duckAttack, id::duckOn },
-                        { id::duckRelease, id::duckOn } },
-              nullptr, 0, 0, id::transientsOn },
-            { "Choke", { id::chokeOn, { id::chokeAmount, id::chokeOn }, { id::chokeFade, id::chokeOn } },
-              nullptr, 0, 0, id::transientsOn },
+            { "Transients", { id::sensitivity }, nullptr, 0, 0, id::transientsOn, id::transientsOn },
+            { "Retrigger", { id::retriggerCount,
+                             { id::retriggerRate, { Condition::off (id::sync) } },
+                             { id::retriggerDivision, { Condition::on (id::sync) } },
+                             id::retriggerAmount, id::retriggerOffset },
+              nullptr, 0, 0, id::transientsOn, id::retriggerOn },
+            { "Duck", { id::duckDepth, id::duckAttack, id::duckRelease },
+              nullptr, 0, 0, id::transientsOn, id::duckOn },
+            { "Choke", { id::chokeAmount, id::chokeFade }, nullptr, 0, 0, id::transientsOn, id::chokeOn },
             { "Envelope", { id::envDensity, id::envSpread }, nullptr, 0, 0, id::transientsOn },
             { "Wake", { id::displace }, nullptr, 0, 0, id::transientsOn } } },
         { "Age", {
-            { "Age", { id::ageOn, id::lifetime, id::degradeBits, id::degradeRate, id::degradeNoise,
+            { "Age", { id::lifetime, id::degradeBits, id::degradeRate, id::degradeNoise,
                        id::degradeTilt, id::degradeDrift, { id::degradeDriftDir, id::degradeDrift } },
-              &curveEditor, kCurveEditorMinW, kCurveEditorH, id::ageOn } } },
+              &curveEditor, kCurveEditorMinW, kCurveEditorH, id::ageOn, id::ageOn } } },
         { "Rewind & Chaos", {
-            { "Rewind", { id::rewindOn, { id::rewindLength, id::rewindOn }, { id::rewindTrigger, id::rewindOn },
-                          { id::rewindInterval, id::rewindOn }, { id::rewindDivision, id::rewindOn },
-                          { id::rewindThreshold, id::rewindOn }, { id::rewindLevel, id::rewindOn },
-                          { id::rewindPitch, id::rewindOn } },
-              nullptr, 0, 0, id::rewindOn },
-            { "Chaos", { id::chaosOn, { id::chaos, id::chaosOn } }, nullptr, 0, 0, id::chaosOn },
+            { "Rewind", { id::rewindLength, id::rewindTrigger,
+                          { id::rewindInterval, { Condition::equals (id::rewindTrigger, kTimer), Condition::off (id::sync) } },
+                          { id::rewindDivision, { Condition::equals (id::rewindTrigger, kTimer), Condition::on (id::sync) } },
+                          { id::rewindThreshold, { Condition::equals (id::rewindTrigger, kThreshold) } },
+                          id::rewindLevel, id::rewindPitch },
+              nullptr, 0, 0, id::rewindOn, id::rewindOn },
+            { "Chaos", {}, nullptr, 0, 0, id::chaosOn, id::chaosOn,
+              "The stage switch for Chaos. Its amount is the Chaos knob on the Main page." },
             { "Freeze", { id::freezeFade } } } },
         { "Mod", {
-            { "Modulation", { id::modOn }, &modPanel, ModPanel::kMinWidth, ModPanel::requiredHeight(), id::modOn } } },
+            { "Modulation", {}, &modPanel, ModPanel::kMinWidth, ModPanel::requiredHeight(), id::modOn, id::modOn } } },
         { "Output", {
             { "Output", { id::output, id::wetHighpass, id::wetLowpass, id::fallbackBpm } } } },
     };
@@ -155,11 +183,6 @@ void SillagePanel::buildPages()
         sectionPages.push_back (page);
         tabs.addTab (spec.name, background, page, true);
     }
-}
-
-void SillagePanel::randomize()
-{
-    processor.randomizeAll (processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f);
 }
 
 void SillagePanel::pulse (const char* parameterId)
@@ -232,6 +255,9 @@ void SillagePanel::loadPreset()
 
 void SillagePanel::timerCallback()
 {
+    meterFeed.push (processor.takeMeter());
+    meter.repaint();
+
     const auto count = processor.getOnsetCount();
     bool repaintIndicator = false;
 
@@ -257,6 +283,10 @@ void SillagePanel::timerCallback()
     undoButton.setEnabled (processor.canUndo());
     redoButton.setEnabled (processor.canRedo());
 
+    // The Rewind button plays the captured tail, and nothing is captured
+    // while Rewind is off.
+    rewindButton.setEnabled (processor.apvts.getRawParameterValue (params::id::rewindOn)->load() >= 0.5f);
+
     // Host-side preset changes show up here too.
     if (presetName.getText() != processor.getPresetName())
         refreshPresetName();
@@ -264,18 +294,21 @@ void SillagePanel::timerCallback()
 
 void SillagePanel::paint (juce::Graphics& g)
 {
-    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+    g.fillAll (ui::colour::background);
 
-    // Hit indicator: a plain square that lights on a transient and fades.
-    g.setColour (juce::Colours::white.withAlpha (0.25f));
-    g.drawRect (hitIndicatorBounds);
-    g.setColour (juce::Colours::white.withAlpha (0.15f + 0.85f * hitGlow));
-    g.fillRect (hitIndicatorBounds.reduced (2));
+    // Hit light: a dot that flashes on a transient and fades.
+    const auto dot = hitIndicatorBounds.toFloat().withSizeKeepingCentre (8.0f, 8.0f).withX ((float) hitIndicatorBounds.getX());
+    g.setColour (ui::colour::faint);
+    g.drawEllipse (dot.reduced (0.5f), 1.2f);
+    if (hitGlow > 0.0f)
+    {
+        g.setColour (ui::colour::accent.withAlpha (hitGlow));
+        g.fillEllipse (dot);
+    }
 
-    g.setColour (juce::Colours::white.withAlpha (0.7f));
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("Hit", hitIndicatorBounds.getRight() + 6, hitIndicatorBounds.getY(),
-                40, hitIndicatorBounds.getHeight(), juce::Justification::centredLeft);
+    g.setColour (ui::colour::dim);
+    g.setFont (ui::font (11.5f));
+    g.drawText ("Hit", hitIndicatorBounds.withTrimmedLeft (13), juce::Justification::centredLeft);
 }
 
 int SillagePanel::getRequiredHeight()
@@ -284,34 +317,37 @@ int SillagePanel::getRequiredHeight()
     for (auto* page : sectionPages)
         pageH = juce::jmax (pageH, page->getRequiredHeight (kBaseWidth));
 
-    return kPad + kTopBarH + kTabBarH + pageH + kPad;
+    return kPad + kTopBarH + kTabBarH + pageH;
 }
 
 void SillagePanel::resized()
 {
-    // Top bar: presets, Type, Freeze, Wake, then the actions and the hit indicator.
-    int x = kPad;
-    const auto barY = kPad, barH = kTopBarH - 8;
+    // Top bar: what is loaded, what to start from, the two things that hold
+    // the sound (Freeze, Wake), the roll and its way back, then the actions.
+    int x = kPad + 4;
+    const auto barY = kPad + (kTopBarH - kBarItemH) / 2 - 2;
     const auto place = [&] (juce::Component& c, int w, int gapAfter)
     {
-        c.setBounds (x, barY, w, barH);
+        c.setBounds (x, barY, w, kBarItemH);
         x += w + gapAfter;
     };
 
-    place (presetName, kPresetNameW, kPad);
-    place (saveButton, kSmallButtonW, 4);
-    place (loadButton, kSmallButtonW, 4);
-    place (initButton, kSmallButtonW, kPad + 4);
-    place (typeBox, kTypeW, kPad + 4);
-    place (freezeButton, kFreezeW, 4);
-    place (wakeBox, kWakeW, kPad + 4);
-    place (randomizeButton, kButtonW, 2);
-    place (randomizeAmount, kAmountW, 4);
-    place (undoButton, kSmallButtonW, 2);
-    place (redoButton, kSmallButtonW, kPad + 4);
-    place (panicButton, kSmallButtonW + 6, 4);
-    place (rewindButton, kSmallButtonW + 14, kPad + 2);
-    hitIndicatorBounds = { x, barY + (barH - kIndicatorSize) / 2, kIndicatorSize, kIndicatorSize };
+    place (presetName, 88, 6);
+    place (saveButton, 40, 4);
+    place (loadButton, 40, 4);
+    place (initButton, 36, 14);
+    place (typeBox, 88, 14);
+    place (freezeButton, 56, 4);
+    place (wakeBox, 84, 14);
+    place (randomizeButton, 80, 4);
+    place (randomizeAmount, 54, 4);
+    place (undoButton, 42, 4);
+    place (redoButton, 42, 14);
+    place (panicButton, 48, 4);
+    place (rewindButton, 56, 14);
+
+    hitIndicatorBounds = { x, barY, 36, kBarItemH };
+    meter.setBounds (getWidth() - kPad - 44, barY, 40, kBarItemH);
 
     tabs.setBounds (0, kPad + kTopBarH, getWidth(), getHeight() - kPad - kTopBarH);
 }
@@ -338,7 +374,7 @@ SillageAudioProcessorEditor::~SillageAudioProcessorEditor() = default;
 
 void SillageAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+    g.fillAll (ui::colour::background);
 }
 
 void SillageAudioProcessorEditor::resized()

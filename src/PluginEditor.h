@@ -7,12 +7,13 @@
 #include "ModPanel.h"
 #include "PluginProcessor.h"
 #include "SectionPage.h"
+#include "SillageLookAndFeel.h"
+#include "Visuals.h"
 
 // The whole UI at its design size: a top bar (presets, Type, Freeze, Wake,
-// the actions and the hit indicator) over a tab strip. The Main tab is eight
-// large knobs that read like a reverb or delay; every other parameter lives
-// on the tab it belongs to. Pure-function (EVS standard): stock knobs, combos
-// and toggles, no decoration.
+// Randomize with its amount, Undo / Redo, Panic, Rewind, the hit light and a
+// small meter) over a tab strip. The Main tab is twelve knobs on four cards;
+// every other parameter lives on a card on the tab it belongs to.
 class SillagePanel : public juce::Component,
                      private juce::Timer
 {
@@ -36,7 +37,6 @@ public:
 private:
     void buildPages();
     void timerCallback() override;
-    void randomize();
     void pulse (const char* parameterId);
     void applyType();
     void savePreset();
@@ -44,6 +44,10 @@ private:
     void refreshPresetName();
 
     SillageAudioProcessor& processor;
+
+    // First in, last out: everything below is drawn with it.
+    ui::LookAndFeel lookAndFeel;
+    ui::MeterFeed   meterFeed;
 
     // Declared before the tabs so the pages (which show them) go first.
     CurveEditor curveEditor;
@@ -64,12 +68,14 @@ private:
     juce::Slider     randomizeAmount { juce::Slider::LinearBar, juce::Slider::TextBoxLeft };
     juce::TextButton undoButton { "Undo" };
     juce::TextButton redoButton { "Redo" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> randomizeAmountAttachment;
     juce::TextButton panicButton { "Panic" };
     juce::TextButton rewindButton { "Rewind" };
+    ui::LevelMeter   meter { meterFeed, true };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   freezeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> wakeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>   randomizeAmountAttachment;
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::TooltipWindow tooltips { this, 600 };
 
     uint64_t lastOnsetCount = 0;
     float    hitGlow        = 0.0f;

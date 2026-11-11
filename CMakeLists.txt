@@ -49,7 +49,9 @@ set(SILLAGE_SOURCES
     src/PluginEditor.cpp
     src/Randomize.cpp
     src/SectionPage.cpp
+    src/SillageLookAndFeel.cpp
     src/Types.cpp
+    src/Visuals.cpp
     src/Wake.cpp)
 
 target_sources(Sillage PRIVATE ${SILLAGE_SOURCES})
@@ -104,7 +106,7 @@ if(SILLAGE_BUILD_SNAPSHOT_TOOL)
     target_compile_definitions(SillageSnapshot PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        JUCE_MODAL_LOOPS_PERMITTED=0
+        JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_STANDALONE_APPLICATION=1)
     target_link_libraries(SillageSnapshot PRIVATE
         juce::juce_audio_utils

@@ -35,11 +35,25 @@ Note: distribution builds assume a JUCE license appropriate for closed-source re
 
 ## Using it
 
-The plugin opens on the **Main** page: nine knobs that read like a reverb or delay.
-**Time** (with Sync and a division under it), **Decay**, **Spread**, **Feedback**, **Size**,
-**Damping** (the loop low-pass), **Shimmer**, **Width** and **Mix**. The top bar has the
-presets, a **Type** selector, **Freeze**, the **Wake** mode and the Randomize / Panic /
-Rewind buttons.
+The plugin opens on the **Main** page: twelve knobs on four cards, each card with a picture
+of what its knobs do.
+
+- **Space** — **Time** (with Sync and a division under it), **Decay**, **Spread**,
+  **Feedback**. The picture is the last six seconds: what went in, in grey, and what the
+  plugin made of it, in white, so the tail can be seen as well as heard.
+- **Grain** — **Density**, **Size**, **Pitch**. The picture is the cloud as the knobs stand:
+  each dash a grain, placed by how far back it reads, as long as Size, as high as its
+  pitch; a reversed grain is red.
+- **Colour** — **Damping** (the loop low-pass), **Shimmer**, **Chaos**. The picture is what
+  one trip round the loop does to the spectrum, with Shimmer's copies stepping away.
+- **Output** — **Width**, **Mix**, with input, wet and output levels and a light for the
+  loop limiter.
+
+The top bar has the presets, a **Type** selector, **Freeze**, the **Wake** mode,
+**Randomize** with its amount, **Undo** / **Redo**, Panic, Rewind, the hit light and a small
+meter. A knob that the current state has taken over (Time under Sync, Density under Grain
+Sync, Damping under its Lifetime Curve) is greyed out, and a knob a mod slot is moving shows
+a red marker where the modulation has it.
 
 **Decay** is how long the tail lasts (an RT60: −60 dB at Decay) and **Feedback** is how
 much of that tail the loop rebuilds. At Feedback 0 the tail is one pass of grains over the
@@ -80,10 +94,13 @@ the last sixteen Randomize, Type, Init and Load actions.
 
 Everything else lives on the tabs — **Grain**, **Feedback**, **Transients**, **Age**,
 **Rewind & Chaos**, **Mod**, **Output** — and none of it needs touching to use the plugin.
-Each stage tab leads with its **On** switch, so a stage can be A/B'd while listening, and the
-knobs that only mean something while another one is on are greyed out until it is (Burst
-Count without Retrigger, the shimmer interval without Shimmer, the division without Sync…).
-Every parameter on every tab is still host-automatable.
+Each tab is a set of cards. A card's switch is the dot at its top right (red when on): the
+stage's own On switch on the card that leads the tab, so a stage can be A/B'd while
+listening, or a feature's switch (Retrigger, Duck, Choke, Grain Sync, Rewind). Whatever a
+card's knobs need that is not there greys them out: Burst Count without Retrigger, the
+shimmer interval without Shimmer, and of two alternatives — a rate in milliseconds or a
+division under Sync, Rewind Every or Rewind Div or Rewind Thresh by trigger mode — only the
+live one is lit. Every parameter on every tab is still host-automatable.
 
 ## Parameters
 
@@ -241,4 +258,6 @@ Setup runs and the installer after, SHA-256 with an RFC 3161 timestamp.
   (`tests/SillageTests.cpp`) that pushes audio through the real processor.
 - UI check without a DAW: configure with `-DSILLAGE_BUILD_SNAPSHOT_TOOL=ON` and run
   `SillageSnapshot <dir>` (under `xvfb-run` on a headless machine) to render every tab of
-  the editor to PNG.
+  the editor to PNG. `--off` turns the stage switches off first, to check the greyed-out
+  state; `--play <Type>` applies a Type and runs a phrase through the plugin while the
+  editor's timers tick, so the tail, the meters and the mod markers have something to show.

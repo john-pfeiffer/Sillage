@@ -1,4 +1,5 @@
 #include "CurveEditor.h"
+#include "SillageLookAndFeel.h"
 
 namespace
 {
@@ -232,13 +233,11 @@ void CurveEditor::paint (juce::Graphics& g)
     const auto& curve = set.curves[(size_t) destination];
     const auto enabled = enableToggle.getToggleState();
 
-    g.setColour (juce::Colours::white.withAlpha (0.06f));
-    g.fillRect (area);
-    g.setColour (juce::Colours::white.withAlpha (0.18f));
-    g.drawRect (area);
+    g.setColour (ui::colour::background.withAlpha (0.55f));
+    g.fillRoundedRectangle (area, 4.0f);
 
     // Quarter grid.
-    g.setColour (juce::Colours::white.withAlpha (0.08f));
+    g.setColour (juce::Colours::white.withAlpha (0.06f));
     for (int i = 1; i < 4; ++i)
     {
         const auto fx = area.getX() + area.getWidth() * (float) i / 4.0f;
@@ -278,11 +277,11 @@ void CurveEditor::paint (juce::Graphics& g)
     // Age readout: where the live tail currently sits on this curve.
     const auto age = processor.getAverageAgeNormalised();
     const auto marker = toScreen (age, curve.evaluate (age));
-    g.setColour (juce::Colours::white.withAlpha (0.5f));
+    g.setColour (ui::colour::accent.withAlpha (0.9f));
     g.drawVerticalLine ((int) marker.x, area.getY(), area.getBottom());
 
-    g.setFont (juce::FontOptions (11.0f));
-    g.setColour (juce::Colours::white.withAlpha (0.5f));
+    g.setFont (ui::font (10.5f));
+    g.setColour (ui::colour::dim);
     g.drawText ("age 0", (int) area.getX() + 3, (int) area.getBottom() - 14, 60, 12, juce::Justification::left);
     g.drawText ("Lifetime", (int) area.getRight() - 63, (int) area.getBottom() - 14, 60, 12, juce::Justification::right);
 }

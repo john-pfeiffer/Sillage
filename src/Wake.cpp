@@ -84,6 +84,15 @@ bool WakeEngine::isRewinding() const noexcept
     return shared.isRewinding() || isolatedRewind.isPlaying();
 }
 
+float WakeEngine::getLimiterGain() const noexcept
+{
+    auto gain = shared.getLimiterGain();
+    for (const auto& instance : instances)
+        if (instance.active)
+            gain = juce::jmin (gain, instance.engine.getLimiterGain());
+    return gain;
+}
+
 int WakeEngine::getActiveGrainCount() const noexcept
 {
     int count = shared.getActiveGrainCount();

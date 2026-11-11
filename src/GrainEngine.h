@@ -215,6 +215,7 @@ public:
     bool isRewinding() const noexcept;
 
     FeedbackPath& getFeedbackPath() noexcept { return feedbackPath; }
+    float getLimiterGain() const noexcept { return feedbackPath.getLimiterGain(); }
 
     // Live grain count, for the debug menu and the cap test.
     int getActiveGrainCount() const noexcept { return activeGrains; }
