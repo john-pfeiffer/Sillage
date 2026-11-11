@@ -2249,6 +2249,122 @@ void testDelayTypeRepeatsAtUnity()
     check (lowest > 0.27f && highest < 0.34f, "Delay type: a steady tone repeats at its own level, without flutter");
 }
 
+// A roll has to be something to listen to. Rolled across every parameter's
+// whole range, six in seven were silent; with the per-parameter ranges and the
+// repairs in Randomize.cpp nearly all of them land near the level of the dry.
+void testRandomizeStaysAudible()
+{
+    const auto source = phrase (2.0);
+    std::vector<float> dry;
+    for (int64_t i = 0; i < (int64_t) atSecond (2.0); ++i)
+        dry.push_back (source (i, 0));
+    const auto dryRms = rms (dry, atSecond (0.25), atSecond (2.0));
+
+    constexpr int rolls = 120;
+    int inWindow = 0, stillLoud = 0, onMix = 0, nonFinite = 0;
+
+    for (int r = 0; r < rolls; ++r)
+    {
+        auto p = makeProcessor();
+        if (r % 2 == 1)
+            types::apply (*p, types::Type::reverb);
+        p->randomizeAll (1.0f);
+
+        for (size_t s = 0; s < params::id::modSource.size(); ++s)
+            if ((int) getParam (*p, params::id::modDestination[s]) == (int) mod::Destination::mix)
+                ++onMix;
+
+        setParam (*p, params::id::mix, 100.0f);
+        Audio out;
+        render (*p, 8.0, source, out);
+
+        const auto level = [&] (double from, double to)
+        {
+            const auto left = rms (out[0], atSecond (from), atSecond (to)), right = rms (out[1], atSecond (from), atSecond (to));
+            return 20.0 * std::log10 (std::max (1.0e-9, std::sqrt (0.5 * (left * left + right * right)) / dryRms));
+        };
+
+        const auto playing = level (0.25, 2.0);
+        if (playing > -20.0 && playing < 9.0) ++inWindow;
+        if (level (7.0, 8.0) > -20.0)         ++stillLoud;
+        if (! allFinite (out))                ++nonFinite;
+    }
+
+    std::printf ("       %d rolls: %d within -20..+9 dB of the dry, %d still loud 5 s after the input stops\n",
+                 rolls, inWindow, stillLoud);
+    check (nonFinite == 0, "randomize: every roll renders finite audio");
+    check (inWindow >= rolls * 9 / 10, "randomize: at least nine rolls in ten are heard at a usable level");
+    check (stillLoud <= rolls / 15, "randomize: hardly any roll is still loud five seconds after the input stops");
+    check (onMix == 0, "randomize: no roll leaves a mod slot aimed at Mix");
+}
+
+// Randomize, a Type, Init and Load each overwrite everything; Undo is the way
+// back, curves included.
+void testUndoRestoresTheWholeState()
+{
+    auto p = makeProcessor();
+    setParam (*p, params::id::time, 512.0f);
+    setParam (*p, params::id::mix, 71.0f);
+    setLine (*p, lifetime::Destination::level, 0.9f, 0.2f, true);
+
+    // Every parameter (to within the rounding a round trip through its range
+    // costs) and the curves exactly.
+    struct Snapshot
+    {
+        std::vector<float> values;
+        juce::String curves;
+
+        bool operator== (const Snapshot& other) const
+        {
+            if (values.size() != other.values.size() || curves != other.curves)
+                return false;
+            for (size_t i = 0; i < values.size(); ++i)
+                if (std::abs (values[i] - other.values[i]) > 1.0e-5f)
+                    return false;
+            return true;
+        }
+        bool operator!= (const Snapshot& other) const { return ! (*this == other); }
+    };
+
+    const auto snapshot = [&]
+    {
+        Snapshot result;
+        for (auto* param : p->getParameters())
+            result.values.push_back (param->getValue());
+        result.curves = lifetime::toValueTree (p->getCurves()).toXmlString();
+        return result;
+    };
+
+    const auto before = snapshot();
+    check (! p->canUndo(), "undo: nothing to undo at first");
+
+    p->randomizeAll (1.0f);
+    const auto rolled = snapshot();
+    check (rolled != before && p->canUndo(), "undo: a roll changes the state and can be undone");
+
+    p->undo();
+    check (snapshot() == before, "undo: restores every parameter and curve exactly");
+    check (std::abs (getParam (*p, params::id::time) - 512.0f) < 0.01f
+               && std::abs (p->getCurves().curves[(size_t) lifetime::Destination::level].points[1].y - 0.2f) < 1.0e-6f,
+           "undo: Time and the Level curve are back");
+
+    check (p->canRedo(), "undo: the roll can be redone");
+    p->redo();
+    check (snapshot() == rolled, "redo: brings the roll back exactly");
+
+    // A Type is undone the same way when the caller records the step first.
+    p->pushUndoState();
+    types::apply (*p, types::Type::wash);
+    p->undo();
+    check (snapshot() == rolled, "undo: steps back over a Type");
+
+    for (int i = 0; i < SillageAudioProcessor::kUndoDepth + 4; ++i)
+        p->randomizeAll (0.5f);
+    int steps = 0;
+    while (p->canUndo()) { p->undo(); ++steps; }
+    check (steps == SillageAudioProcessor::kUndoDepth, "undo: keeps the last sixteen steps");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2323,6 +2439,9 @@ int main()
     testLoopColoursTheTailWithDecayOn();
     testTypesSitAtTheDryLevel();
     testDelayTypeRepeatsAtUnity();
+
+    testRandomizeStaysAudible();
+    testUndoRestoresTheWholeState();
 
     std::printf (failures == 0 ? "\nAll tests passed.\n"
                                : "\n%d test(s) FAILED.\n", failures);

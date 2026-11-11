@@ -31,13 +31,9 @@ float fold (float x) noexcept
     return x < 0.0f ? -folded : folded;
 }
 
-float saturate (float x, int type, float gain) noexcept
+float saturate (float x, int type, float gain, float makeup) noexcept
 {
     const float driven = x * gain;
-    // Normalising by sqrt(gain) rather than gain keeps Drive from silently
-    // changing the loop gain: the tail gets denser and brighter, not just
-    // louder or quieter.
-    const float makeup = 1.0f / std::sqrt (gain);
 
     switch (type)
     {
@@ -210,13 +206,18 @@ void FeedbackPath::setSettings (const Settings& settings)
     highpass.setCutoffFrequency (juce::jlimit (20.0f, (float) (sampleRate * 0.45), settings.highpassHz));
     lowpass.setCutoffFrequency  (juce::jlimit (20.0f, (float) (sampleRate * 0.45), settings.lowpassHz));
 
-    const auto q = 0.5f + settings.resonance * 5.5f;
+    const auto q = resonanceFor (settings.resonance);
     highpass.setResonance (q);
     lowpass.setResonance (q);
 
     shimmer.setSemitones (settings.shimmerSemitones);
 
-    driveGain    = 1.0f + settings.drive * 11.0f;
+    // Normalising by sqrt(gain) rather than gain keeps Drive from silently
+    // changing the loop gain of loud audio: the tail gets denser and
+    // brighter, not just louder or quieter. A quiet tail, though, comes out
+    // sqrt(gain) up — which is what driveKeepsQuietLevel takes back.
+    driveGain    = driveGainFor (settings.drive);
+    driveMakeup  = settings.driveKeepsQuietLevel ? 1.0f / driveGain : 1.0f / std::sqrt (driveGain);
     diffuseCoeff = settings.diffuse * 0.7f;
 
     degradeActive = settings.degradeBitsPerPass > 0.0f
@@ -308,7 +309,7 @@ void FeedbackPath::processFrame (float* samples, int numChannels, float ageSecon
     }
 
     for (int channel = 0; channel < active; ++channel)
-        samples[channel] = saturate (samples[channel], current.satType, driveGain);
+        samples[channel] = saturate (samples[channel], current.satType, driveGain, driveMakeup);
 
     // Degrade: cheap, cumulative, and driven by how old the audio is — the way
     // tape and BBD delays fall apart a little more on every pass.

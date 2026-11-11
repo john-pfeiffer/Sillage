@@ -558,12 +558,12 @@ void GrainEngine::activateGrain (double startPos, double rate, const Settings& s
     // fully decorrelated.
     const auto& stats    = windowStats();
     const auto shapeIndex = (size_t) juce::jlimit (0, (int) WindowShape::numShapes - 1, (int) settings.window);
-    const auto overlap   = juce::jmax (1.0, settings.density * (length / sampleRate));
+    const auto overlap   = juce::jmax (1.0, grainsPerSecond * (length / sampleRate));
     const auto coherent  = juce::jmin (1.0, 1.0 / (stats.mean[shapeIndex] * overlap));
     // A sparse cloud is made up too, within reason: its grains are few, so
     // each one has to carry more for the cloud to be as loud as its source.
     // Grains that read in step never are — a sparse delay is its gaps.
-    const auto cover      = juce::jmax (1.0e-3, settings.density * (length / sampleRate));
+    const auto cover      = juce::jmax (1.0e-3, grainsPerSecond * (length / sampleRate));
     const auto incoherent = juce::jmin (kMaxSparseMakeup, 1.0 / std::sqrt (stats.meanSquare[shapeIndex] * cover));
     //
     // How far apart Spread puts the reads is what decides it, not the knob's
@@ -815,6 +815,10 @@ void GrainEngine::process (const float* const* input,
     const auto interval = synced ? settings.syncIntervalSamples
                                  : sampleRate / juce::jmax (0.5, settings.density);
     const auto swingDelay = synced ? (double) settings.swing * interval / 3.0 : 0.0;
+
+    // The loudness compensation has to count the grains that are fired, not
+    // the Density knob Sync has taken over from.
+    grainsPerSecond = sampleRate / juce::jmax (1.0, interval);
 
     // Freeze crossfades the write over Freeze Fade; 0 ms is an instant stop.
     const auto writeTarget = settings.freeze ? 0.0f : 1.0f;

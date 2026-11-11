@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <vector>
@@ -54,6 +57,11 @@ public:
         int   satType          = 0;     // 0 soft, 1 hard, 2 fold
         float drive            = 0.0f;  // 0..1
 
+        // Decay on: the saturator's make-up is 1/gain rather than 1/sqrt(gain),
+        // so a quiet tail leaves it at the level it went in and Drive cannot
+        // hold a tail past Decay. Loud audio is squashed harder for it.
+        bool  driveKeepsQuietLevel = false;
+
         // Per-pass Degrade (5.6 A). "Per pass" is a function of the audio's
         // age: passes = age / passSeconds, so the stage compounds with age
         // instead of re-applying an idempotent crush every time round.
@@ -71,6 +79,17 @@ public:
     void prepare (double sampleRate, int numChannels);
     void reset();
     void setSettings (const Settings& settings);
+
+    // Drive 0..1 -> the gain into the saturator; Resonance 0..1 -> filter Q.
+    static float driveGainFor (float drive) noexcept     { return 1.0f + drive * 11.0f; }
+    static float resonanceFor (float resonance) noexcept { return 0.5f + resonance * 5.5f; }
+
+    // A resonant filter passes its own Q at the cutoff. With Decay on the
+    // loop gives that back, or Resonance would hold a tail there forever.
+    static float resonantGain (float resonance) noexcept
+    {
+        return std::max (1.0f, resonanceFor (resonance));
+    }
 
     // Processes one frame in place and leaves it limited, ready for the buffer.
     // `ageSeconds` is how old the audio in this frame is (amplitude-weighted).
@@ -102,6 +121,7 @@ private:
 
     Settings current;
     float driveGain      = 1.0f;
+    float driveMakeup    = 1.0f;
     float diffuseCoeff   = 0.0f;
 
     // Degrade state.

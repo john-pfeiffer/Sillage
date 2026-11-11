@@ -79,6 +79,21 @@ public:
     juce::String getPresetName() const;
     void setPresetName (const juce::String& name);
 
+    // Randomize (5.10): parameters and curves by `amount` (0..1), kept
+    // audible by randomize::constrain. Records an undo step first.
+    void randomizeAll (float amount);
+
+    // Undo for the actions that overwrite everything at once: Randomize, a
+    // Type, Init, loading a preset. Call pushUndoState() before the change;
+    // undo() and redo() then step through whole states, curves included.
+    // Message thread only.
+    static constexpr int kUndoDepth = 16;
+    void pushUndoState();
+    bool canUndo() const noexcept { return ! undoStack.empty(); }
+    bool canRedo() const noexcept { return ! redoStack.empty(); }
+    void undo();
+    void redo();
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -102,7 +117,7 @@ private:
     decay::Model resolveDecayModel (float spread, float feedback) const;
     GrainEngine::Settings resolveGrainSettings (const ChaosValues& chaos, float envelope,
                                                 decay::Model& decayModel) const;
-    FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos, double tripSeconds) const;
+    FeedbackPath::Settings resolveFeedbackSettings (const ChaosValues& chaos, const decay::Model& decayModel) const;
     GrainEngine::TransientResponse resolveTransientResponse() const;
     WakeEngine::Settings resolveWakeSettings() const;
     void updateRewindTriggers (int numSamples);
@@ -144,6 +159,10 @@ private:
 
     // Post-loop wet stage (5.11): HP/LP, then Width, ahead of Mix.
     juce::dsp::StateVariableTPTFilter<float> wetHighpass, wetLowpass;
+
+    void restoreState (const juce::ValueTree& state);
+    std::vector<juce::ValueTree> undoStack, redoStack;
+    juce::Random randomizeRng;
 
     juce::SmoothedValue<float> mixSmoothed, outputGainSmoothed, widthSmoothed;
     juce::AudioBuffer<float> wetBuffer;

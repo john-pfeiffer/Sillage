@@ -61,12 +61,15 @@ private:
     juce::TextButton freezeButton { "Freeze" };
     juce::ComboBox   wakeBox;
     juce::TextButton randomizeButton { "Randomize" };
+    juce::Slider     randomizeAmount { juce::Slider::LinearBar, juce::Slider::TextBoxLeft };
+    juce::TextButton undoButton { "Undo" };
+    juce::TextButton redoButton { "Redo" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> randomizeAmountAttachment;
     juce::TextButton panicButton { "Panic" };
     juce::TextButton rewindButton { "Rewind" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   freezeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> wakeAttachment;
     std::unique_ptr<juce::FileChooser> chooser;
-    juce::Random randomizeRng;
 
     uint64_t lastOnsetCount = 0;
     float    hitGlow        = 0.0f;

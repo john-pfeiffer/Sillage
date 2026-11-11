@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Randomize.h"
 
 namespace
 {
@@ -144,6 +145,61 @@ void SillageAudioProcessor::resetToDefaults()
 
     setCurves (lifetime::defaultCurveSet());
     setPresetName ("Init");
+}
+
+// ---- Randomize and undo ------------------------------------------------------
+
+void SillageAudioProcessor::randomizeAll (float amount)
+{
+    amount = juce::jlimit (0.0f, 1.0f, amount);
+    if (amount <= 0.0f)
+        return;
+
+    pushUndoState();
+    randomize::apply (apvts, amount, randomizeRng);
+
+    // Curves are randomised too (5.10); they live in the state tree.
+    auto curves = getCurves();
+    lifetime::randomise (curves, amount, randomizeRng);
+    randomize::constrain (curves);
+    setCurves (curves);
+}
+
+void SillageAudioProcessor::pushUndoState()
+{
+    undoStack.push_back (apvts.copyState());
+    if ((int) undoStack.size() > kUndoDepth)
+        undoStack.erase (undoStack.begin());
+    redoStack.clear();
+}
+
+void SillageAudioProcessor::restoreState (const juce::ValueTree& state)
+{
+    apvts.replaceState (state.createCopy());
+    ensureCurvesInState();
+    publishCurves();
+}
+
+void SillageAudioProcessor::undo()
+{
+    if (undoStack.empty())
+        return;
+
+    redoStack.push_back (apvts.copyState());
+    const auto state = undoStack.back();
+    undoStack.pop_back();
+    restoreState (state);
+}
+
+void SillageAudioProcessor::redo()
+{
+    if (redoStack.empty())
+        return;
+
+    undoStack.push_back (apvts.copyState());
+    const auto state = redoStack.back();
+    redoStack.pop_back();
+    restoreState (state);
 }
 
 // ---- Lifecycle ---------------------------------------------------------------
@@ -389,6 +445,12 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
     settings.loopGain           = (float) decayModel.loopGain;
     settings.wetGain            = (float) decayModel.wetGain;
 
+    // Decay is the length whatever the loop's colour: a resonant filter adds
+    // gain at its cutoff and the loop hands exactly that back. (Drive is
+    // handled in the saturator's make-up, see resolveFeedbackSettings.)
+    if (decayModel.windowSeconds > 0.0 && parameterValue (params::id::loopOn) >= 0.5f)
+        settings.loopGain /= FeedbackPath::resonantGain (parameterValue (params::id::fbResonance) * 0.01f);
+
     settings.pitchSemitones    = modulated (mod::Destination::pitch)
                                + parameterValue (params::id::pitchFine) * 0.01f;
     settings.pitchModSemitones = chaosAmt * chaos.pitch * kChaosPitchSemitones;
@@ -438,7 +500,7 @@ GrainEngine::Settings SillageAudioProcessor::resolveGrainSettings (const ChaosVa
 }
 
 FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const ChaosValues& chaos,
-                                                                       double tripSeconds) const
+                                                                       const decay::Model& decayModel) const
 {
     FeedbackPath::Settings settings;
 
@@ -497,7 +559,8 @@ FeedbackPath::Settings SillageAudioProcessor::resolveFeedbackSettings (const Cha
     settings.driftDirection       = juce::jlimit (0, 2, (int) parameterValue (params::id::degradeDriftDir));
     // "Per pass" is per trip through the loop: Time at Spread 0, the cloud's
     // own average reach as Spread opens up.
-    settings.passSeconds          = tripSeconds;
+    settings.passSeconds          = decayModel.tripSeconds;
+    settings.driveKeepsQuietLevel = decayModel.windowSeconds > 0.0;
 
     return settings;
 }
@@ -635,7 +698,7 @@ void SillageAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     decay::Model decayModel;
     const auto grainSettings = resolveGrainSettings (chaos, envelope, decayModel);
 
-    wake.setFeedbackSettings (resolveFeedbackSettings (chaos, decayModel.tripSeconds));
+    wake.setFeedbackSettings (resolveFeedbackSettings (chaos, decayModel));
     wake.process (buffer.getArrayOfReadPointers(),
                   wetBuffer.getArrayOfWritePointers(),
                   numOut, numSamples,

@@ -1,12 +1,11 @@
 #include "PluginEditor.h"
-#include "Randomize.h"
 #include "Types.h"
 
 namespace
 {
 constexpr int kPad = 8, kTopBarH = 32, kTabBarH = 26;
-constexpr int kButtonW = 78, kSmallButtonW = 46, kIndicatorSize = 14, kPresetNameW = 140;
-constexpr int kTypeW = 100, kFreezeW = 62, kWakeW = 92;
+constexpr int kButtonW = 74, kSmallButtonW = 42, kIndicatorSize = 14, kPresetNameW = 96;
+constexpr int kTypeW = 92, kFreezeW = 58, kWakeW = 86, kAmountW = 56;
 constexpr int kCurveEditorH = 210, kCurveEditorMinW = 320;
 constexpr int kTimerHz = 30;
 constexpr int kMinWindowW = 640, kMaxWindowW = 2560;
@@ -38,7 +37,7 @@ SillagePanel::SillagePanel (SillageAudioProcessor& p)
 
     saveButton.onClick = [this] { savePreset(); };
     loadButton.onClick = [this] { loadPreset(); };
-    initButton.onClick = [this] { processor.resetToDefaults(); refreshPresetName(); };
+    initButton.onClick = [this] { processor.pushUndoState(); processor.resetToDefaults(); refreshPresetName(); };
     addAndMakeVisible (saveButton);
     addAndMakeVisible (loadButton);
     addAndMakeVisible (initButton);
@@ -63,6 +62,20 @@ SillagePanel::SillagePanel (SillageAudioProcessor& p)
     addAndMakeVisible (wakeBox);
 
     randomizeButton.onClick = [this] { randomize(); };
+
+    // How far a roll goes sits beside the button that rolls: 100 % is a new
+    // sound, 20 % is "like this, but different".
+    randomizeAmount.setTextValueSuffix (" %");
+    randomizeAmount.setTooltip ("How far Randomize moves everything: 100 % is a full reroll, 20 % a nudge");
+    randomizeAmountAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.apvts, params::id::randomizeAmount, randomizeAmount);
+    addAndMakeVisible (randomizeAmount);
+
+    undoButton.onClick = [this] { processor.undo(); refreshPresetName(); };
+    redoButton.onClick = [this] { processor.redo(); refreshPresetName(); };
+    undoButton.setTooltip ("Step back over the last Randomize, Type, Init or Load");
+    addAndMakeVisible (undoButton);
+    addAndMakeVisible (redoButton);
     panicButton.onClick     = [this] { pulse (params::id::panic); };
     rewindButton.onClick    = [this] { pulse (params::id::rewindManual); };
     addAndMakeVisible (randomizeButton);
@@ -125,7 +138,7 @@ void SillagePanel::buildPages()
                           { id::rewindPitch, id::rewindOn } },
               nullptr, 0, 0, id::rewindOn },
             { "Chaos", { id::chaosOn, { id::chaos, id::chaosOn } }, nullptr, 0, 0, id::chaosOn },
-            { "Freeze & Randomize", { id::freezeFade, id::randomizeAmount } } } },
+            { "Freeze", { id::freezeFade } } } },
         { "Mod", {
             { "Modulation", { id::modOn }, &modPanel, ModPanel::kMinWidth, ModPanel::requiredHeight(), id::modOn } } },
         { "Output", {
@@ -142,13 +155,7 @@ void SillagePanel::buildPages()
 
 void SillagePanel::randomize()
 {
-    const auto amount = processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f;
-    randomize::apply (processor.apvts, amount, randomizeRng);
-
-    // Curves are randomised too (5.10); they live in the state tree.
-    auto curves = processor.getCurves();
-    lifetime::randomise (curves, amount, randomizeRng);
-    processor.setCurves (curves);
+    processor.randomizeAll (processor.apvts.getRawParameterValue (params::id::randomizeAmount)->load() * 0.01f);
 }
 
 void SillagePanel::pulse (const char* parameterId)
@@ -167,6 +174,7 @@ void SillagePanel::applyType()
     if (id <= 0)
         return;
 
+    processor.pushUndoState();
     types::apply (processor, (types::Type) (id - 1));
     refreshPresetName();
     typeBox.setSelectedId (0, juce::dontSendNotification);
@@ -211,6 +219,7 @@ void SillagePanel::loadPreset()
                               const auto file = fc.getResult();
                               if (file.existsAsFile())
                               {
+                                  processor.pushUndoState();
                                   processor.loadPreset (file);
                                   refreshPresetName();
                               }
@@ -240,6 +249,9 @@ void SillagePanel::timerCallback()
     // The curve editor shows where the live tail sits on its curve.
     if (curveEditor.isShowing())
         curveEditor.repaint();
+
+    undoButton.setEnabled (processor.canUndo());
+    redoButton.setEnabled (processor.canRedo());
 
     // Host-side preset changes show up here too.
     if (presetName.getText() != processor.getPresetName())
@@ -285,13 +297,16 @@ void SillagePanel::resized()
     place (presetName, kPresetNameW, kPad);
     place (saveButton, kSmallButtonW, 4);
     place (loadButton, kSmallButtonW, 4);
-    place (initButton, kSmallButtonW, kPad * 2);
-    place (typeBox, kTypeW, kPad * 2);
+    place (initButton, kSmallButtonW, kPad + 4);
+    place (typeBox, kTypeW, kPad + 4);
     place (freezeButton, kFreezeW, 4);
-    place (wakeBox, kWakeW, kPad * 2);
-    place (randomizeButton, kButtonW, 4);
-    place (panicButton, kSmallButtonW + 8, 4);
-    place (rewindButton, kSmallButtonW + 14, kPad * 2);
+    place (wakeBox, kWakeW, kPad + 4);
+    place (randomizeButton, kButtonW, 2);
+    place (randomizeAmount, kAmountW, 4);
+    place (undoButton, kSmallButtonW, 2);
+    place (redoButton, kSmallButtonW, kPad + 4);
+    place (panicButton, kSmallButtonW + 6, 4);
+    place (rewindButton, kSmallButtonW + 14, kPad + 2);
     hitIndicatorBounds = { x, barY + (barH - kIndicatorSize) / 2, kIndicatorSize, kIndicatorSize };
 
     tabs.setBounds (0, kPad + kTopBarH, getWidth(), getHeight() - kPad - kTopBarH);

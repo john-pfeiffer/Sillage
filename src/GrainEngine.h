@@ -290,6 +290,7 @@ private:
     int     grainCap     = kMaxGrains;
     int64_t grainCounter = 0;
     double  samplesUntilNextGrain = 0.0;
+    double  grainsPerSecond = 20.0; // what the scheduler is really firing: Density, or the Sync division
     bool    slotParity = false; // swing alternates on this
 
     juce::Random rng;
